@@ -102,6 +102,7 @@
 #include "modules/DropzoneModule.h"
 #endif
 
+#include "modules/FriendFinderModule.h" // FriendFinderModule is a scaffold for “Find-My-Friend” feature.
 /**
  * Create module instances here.  If you are adding a new module, you must 'new' it here (or somewhere else)
  */
@@ -160,6 +161,7 @@ void setupModules()
 #if !MESHTASTIC_EXCLUDE_POWERSTRESS
         new PowerStressModule();
 #endif
+        new FriendFinderModule();
         // Example: Put your module here
         // new ReplyModule();
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER
