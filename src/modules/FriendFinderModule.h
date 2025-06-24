@@ -1,26 +1,35 @@
 #pragma once
-/**
- * FriendFinderModule — scaffold for “Find-My-Friend” feature.
- * Only fulfils the pure-virtual contract of MeshModule for now.
- */
 
-#include "MeshModule.h"           // Meshtastic core base class
+#include "mesh/MeshModule.h"
+#include "mesh/generated/meshtastic/friend_finder.pb.h"
+#include "mesh/mesh-pb-constants.h"
 
 class FriendFinderModule : public MeshModule {
 public:
-    /**
-     * @brief MeshModule requires a name string in its ctor. This is the constructor that the compiler is looking for.
-     */
-    FriendFinderModule() : MeshModule("FriendFinder") {}
+    FriendFinderModule();
+    ~FriendFinderModule() override = default;
 
-    /**
-     * @brief This function is called during device startup.
-     */
-    void setup() override {}
+    void setup() override;
+    void loop() override;
+    void handlePacket(const meshtastic_MeshPacket *packet);
+    bool wantPacket(const meshtastic_MeshPacket *packet) override;
 
-    /**
-     * @brief We ignore every packet until real logic arrives.
-     * The signature for wantPacket must match the base class exactly.
-     */
-    bool wantPacket(const meshtastic_MeshPacket *packet) override { return false; }
+    void startSearch();
+    void stop();
+
+    // Define a port number for this module in the private application range
+    static const uint8_t PORT_FRIEND_FINDER = meshtastic_PortNum_PRIVATE_APP;
+
+private:
+    enum class Mode { IDLE, SEARCHING, TRACKING };
+    Mode     mode_;
+    uint32_t lastSendMs_;
+    uint32_t lastRecvMs_;
+    const meshtastic_MeshPacket *pendingPacket_;
+
+    static constexpr const char *TAG = "FriendFinder";
+
+    void sendProtobuf(const meshtastic_FriendFinder &msg);
+    void sendHello();
+    void sendStatus();
 };
