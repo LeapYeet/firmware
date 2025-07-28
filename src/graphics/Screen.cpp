@@ -64,6 +64,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "modules/WaypointModule.h"
 #include "sleep.h"
 #include "target_specific.h"
+#include "modules/FriendFinderModule.h" // For friendFinderModule
+extern FriendFinderModule* friendFinderModule;
+
 
 using graphics::Emote;
 using graphics::emotes;
@@ -1245,19 +1248,28 @@ int Screen::handleInputEvent(const InputEvent *event)
                     const char *banner_message;
                     int options;
                     if (kb_found) {
-                        banner_message = "Action?\nBack\nSleep Screen\nNew Preset Msg\nNew Freetext Msg";
-                        options = 4;
+                        banner_message = "Action?\nBack\nSleep Screen\nNew Preset Msg\nNew Freetext Msg\nFriend Finder";
+                        options = 5;
                     } else {
-                        banner_message = "Action?\nBack\nSleep Screen\nNew Preset Msg";
-                        options = 3;
+                        banner_message = "Action?\nBack\nSleep Screen\nNew Preset Msg\nFriend Finder";
+                        options = 4;
                     }
                     showOverlayBanner(banner_message, 30000, options, [](int selected) -> void {
                         if (selected == 1) {
                             screen->setOn(false);
                         } else if (selected == 2) {
+                            LOG_DEBUG("Launch canned message WITHOUT KEYBOARD");
                             cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
-                        } else if (selected == 3) {
+                        } else if (selected == 3 && kb_found) {
+                            LOG_DEBUG("Launch canned message WITH KEYBOARD");
                             cannedMessageModule->LaunchFreetextWithDestination(NODENUM_BROADCAST);
+                        }else if (selected == 3 && !kb_found) {
+                            LOG_DEBUG("Launch Friend Finder");
+                            friendFinderModule->launchMenu(); 
+                        }
+                        else if (selected == 4 && kb_found) {
+                            LOG_DEBUG("Launch Friend Finder");
+                            friendFinderModule->launchMenu();
                         }
                     });
 #if HAS_TFT

@@ -7,7 +7,8 @@
 #include <OLEDDisplay.h>
 #include <string>
 #include <vector>
-
+class FriendFinderModule;                 
+extern FriendFinderModule *friendFinderModule;
 #define getStringCenteredX(s) ((SCREEN_WIDTH - display->getStringWidth(s)) / 2)
 
 #if !HAS_SCREEN

@@ -102,7 +102,8 @@
 #include "modules/DropzoneModule.h"
 #endif
 
-#include "modules/FriendFinderModule.h" // FriendFinderModule is a scaffold for “Find-My-Friend” feature.
+#include "FriendFinderModule.h"
+
 /**
  * Create module instances here.  If you are adding a new module, you must 'new' it here (or somewhere else)
  */
@@ -152,7 +153,9 @@ void setupModules()
 #if !MESHTASTIC_EXCLUDE_GENERIC_THREAD_MODULE
         new GenericThreadModule();
 #endif
-        // Note: if the rest of meshtastic doesn't need to explicitly use your module, you do not need to assign the instance
+
+friendFinderModule = new FriendFinderModule();        
+ 
         // to a global variable.
 
 #if !MESHTASTIC_EXCLUDE_REMOTEHARDWARE
@@ -161,7 +164,6 @@ void setupModules()
 #if !MESHTASTIC_EXCLUDE_POWERSTRESS
         new PowerStressModule();
 #endif
-        new FriendFinderModule();
         // Example: Put your module here
         // new ReplyModule();
 #if (HAS_BUTTON || ARCH_PORTDUINO) && !MESHTASTIC_EXCLUDE_INPUTBROKER

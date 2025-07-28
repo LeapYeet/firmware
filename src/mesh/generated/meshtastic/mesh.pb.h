@@ -11,6 +11,7 @@
 #include "meshtastic/telemetry.pb.h"
 #include "meshtastic/xmodem.pb.h"
 #include "meshtastic/device_ui.pb.h"
+#include "meshtastic/friendfinder.pb.h"
 
 #if PB_PROTO_HEADER_VERSION != 40
 #error Regenerate this file with the current version of nanopb generator.
@@ -666,7 +667,7 @@ typedef struct _meshtastic_Routing {
 
 typedef PB_BYTES_ARRAY_T(233) meshtastic_Data_payload_t;
 /* (Formerly called SubPacket)
- The payload portion fo a packet, this is the actual bytes that are sent
+ The payload portion for a packet, this is the actual bytes that are sent
  inside a radio packet (because from/to are broken out by the comms library) */
 typedef struct _meshtastic_Data {
     /* Formerly named typ and of type Type */
@@ -698,6 +699,10 @@ typedef struct _meshtastic_Data {
     /* Bitfield for extra flags. First use is to indicate that user approves the packet being uploaded to MQTT. */
     bool has_bitfield;
     uint8_t bitfield;
+    /* If set, this message is intended to be sent over the mesh using the FriendFinder protocol.
+ This is used to begin the friend-finding process. */
+    bool has_friend_finder;
+    meshtastic_FriendFinder friend_finder;
 } meshtastic_Data;
 
 typedef PB_BYTES_ARRAY_T(32) meshtastic_KeyVerification_hash1_t;
@@ -1287,7 +1292,7 @@ extern "C" {
 #define meshtastic_User_init_default             {"", "", "", {0}, _meshtastic_HardwareModel_MIN, 0, _meshtastic_Config_DeviceConfig_Role_MIN, {0, {0}}, false, 0}
 #define meshtastic_RouteDiscovery_init_default   {0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, 0, 0, 0, 0, 0, 0, 0}}
 #define meshtastic_Routing_init_default          {0, {meshtastic_RouteDiscovery_init_default}}
-#define meshtastic_Data_init_default             {_meshtastic_PortNum_MIN, {0, {0}}, 0, 0, 0, 0, 0, 0, false, 0}
+#define meshtastic_Data_init_default             {_meshtastic_PortNum_MIN, {0, {0}}, 0, 0, 0, 0, 0, 0, false, 0, false, meshtastic_FriendFinder_init_default}
 #define meshtastic_KeyVerification_init_default  {0, {0, {0}}, {0, {0}}}
 #define meshtastic_Waypoint_init_default         {0, false, 0, false, 0, 0, 0, "", "", 0}
 #define meshtastic_MqttClientProxyMessage_init_default {"", 0, {{0, {0}}}, 0}
@@ -1318,7 +1323,7 @@ extern "C" {
 #define meshtastic_User_init_zero                {"", "", "", {0}, _meshtastic_HardwareModel_MIN, 0, _meshtastic_Config_DeviceConfig_Role_MIN, {0, {0}}, false, 0}
 #define meshtastic_RouteDiscovery_init_zero      {0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, 0, 0, 0, 0, 0, 0, 0}}
 #define meshtastic_Routing_init_zero             {0, {meshtastic_RouteDiscovery_init_zero}}
-#define meshtastic_Data_init_zero                {_meshtastic_PortNum_MIN, {0, {0}}, 0, 0, 0, 0, 0, 0, false, 0}
+#define meshtastic_Data_init_zero                {_meshtastic_PortNum_MIN, {0, {0}}, 0, 0, 0, 0, 0, 0, false, 0, false, meshtastic_FriendFinder_init_zero}
 #define meshtastic_KeyVerification_init_zero     {0, {0, {0}}, {0, {0}}}
 #define meshtastic_Waypoint_init_zero            {0, false, 0, false, 0, 0, 0, "", "", 0}
 #define meshtastic_MqttClientProxyMessage_init_zero {"", 0, {{0, {0}}}, 0}
@@ -1395,6 +1400,7 @@ extern "C" {
 #define meshtastic_Data_reply_id_tag             7
 #define meshtastic_Data_emoji_tag                8
 #define meshtastic_Data_bitfield_tag             9
+#define meshtastic_Data_friend_finder_tag        10
 #define meshtastic_KeyVerification_nonce_tag     1
 #define meshtastic_KeyVerification_hash1_tag     2
 #define meshtastic_KeyVerification_hash2_tag     3
@@ -1599,9 +1605,11 @@ X(a, STATIC,   SINGULAR, FIXED32,  source,            5) \
 X(a, STATIC,   SINGULAR, FIXED32,  request_id,        6) \
 X(a, STATIC,   SINGULAR, FIXED32,  reply_id,          7) \
 X(a, STATIC,   SINGULAR, FIXED32,  emoji,             8) \
-X(a, STATIC,   OPTIONAL, UINT32,   bitfield,          9)
+X(a, STATIC,   OPTIONAL, UINT32,   bitfield,          9) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  friend_finder,    10)
 #define meshtastic_Data_CALLBACK NULL
 #define meshtastic_Data_DEFAULT NULL
+#define meshtastic_Data_friend_finder_MSGTYPE meshtastic_FriendFinder
 
 #define meshtastic_KeyVerification_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT64,   nonce,             1) \
@@ -1948,7 +1956,7 @@ extern const pb_msgdesc_t meshtastic_ChunkedPayloadResponse_msg;
 #define meshtastic_ChunkedPayload_size           245
 #define meshtastic_ClientNotification_size       482
 #define meshtastic_Compressed_size               239
-#define meshtastic_Data_size                     269
+#define meshtastic_Data_size                     301
 #define meshtastic_DeviceMetadata_size           54
 #define meshtastic_DuplicatedPublicKey_size      0
 #define meshtastic_FileInfo_size                 236
@@ -1960,7 +1968,7 @@ extern const pb_msgdesc_t meshtastic_ChunkedPayloadResponse_msg;
 #define meshtastic_KeyVerification_size          79
 #define meshtastic_LogRecord_size                426
 #define meshtastic_LowEntropyKey_size            0
-#define meshtastic_MeshPacket_size               378
+#define meshtastic_MeshPacket_size               410
 #define meshtastic_MqttClientProxyMessage_size   501
 #define meshtastic_MyNodeInfo_size               77
 #define meshtastic_NeighborInfo_size             258
