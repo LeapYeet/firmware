@@ -104,7 +104,11 @@
 #endif
 
 #include "FriendFinderModule.h"
+<<<<<<< HEAD
 #include "MagnetometerModule.h"
+=======
+
+>>>>>>> 539dddfcd (stab)
 /**
  * Create module instances here.  If you are adding a new module, you must 'new' it here (or somewhere else)
  */
