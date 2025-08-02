@@ -38,7 +38,13 @@ release/
 /compile_commands.json
 src/mesh/raspihttp/certificate.pem
 src/mesh/raspihttp/private_key.pem
+<<<<<<< HEAD
 platformio.ini
 .gitignore
 get-platformio.py
 platformio.ini
+=======
+
+# Ignore logo (set at build time with platformio-custom.py)
+data/boot/logo.*
+>>>>>>> 1a8ab2aadc6adac01bbf5f5b186e0ca3d3382975

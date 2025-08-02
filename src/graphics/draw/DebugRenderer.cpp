@@ -67,21 +67,6 @@ void drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16
 
     char channelStr[20];
     snprintf(channelStr, sizeof(channelStr), "#%s", channels.getName(channels.getPrimaryIndex()));
-
-    // Display power status
-    if (powerStatus->getHasBattery()) {
-        if (config.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_DEFAULT) {
-            UIRenderer::drawBattery(display, x, y + 2, imgBattery, powerStatus);
-        } else {
-            UIRenderer::drawBattery(display, x + 1, y + 3, imgBattery, powerStatus);
-        }
-    } else if (powerStatus->knowsUSB()) {
-        if (config.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_DEFAULT) {
-            display->drawFastImage(x, y + 2, 16, 8, powerStatus->getHasUSB() ? imgUSB : imgPower);
-        } else {
-            display->drawFastImage(x + 1, y + 3, 16, 8, powerStatus->getHasUSB() ? imgUSB : imgPower);
-        }
-    }
     // Display nodes status
     if (config.display.displaymode == meshtastic_Config_DisplayConfig_DisplayMode_DEFAULT) {
         UIRenderer::drawNodes(display, x + (SCREEN_WIDTH * 0.25), y + 2, nodeStatus);
@@ -393,7 +378,7 @@ void drawLoRaFocused(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x,
     int line = 1;
 
     // === Set Title
-    const char *titleStr = (SCREEN_WIDTH > 128) ? "LoRa Info" : "LoRa";
+    const char *titleStr = (isHighResolution) ? "LoRa Info" : "LoRa";
 
     // === Header ===
     graphics::drawCommonHeader(display, x, y, titleStr);
@@ -427,9 +412,9 @@ void drawLoRaFocused(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x,
     float freq = RadioLibInterface::instance->getFreq();
     snprintf(freqStr, sizeof(freqStr), "%.3f", freq);
     if (config.lora.channel_num == 0) {
-        snprintf(frequencyslot, sizeof(frequencyslot), "Freq: %smhz", freqStr);
+        snprintf(frequencyslot, sizeof(frequencyslot), "Freq: %sMHz", freqStr);
     } else {
-        snprintf(frequencyslot, sizeof(frequencyslot), "Freq/Ch: %smhz (%d)", freqStr, config.lora.channel_num);
+        snprintf(frequencyslot, sizeof(frequencyslot), "Freq/Ch: %sMHz (%d)", freqStr, config.lora.channel_num);
     }
     size_t len = strlen(frequencyslot);
     if (len >= 4 && strcmp(frequencyslot + len - 4, " (0)") == 0) {
@@ -444,12 +429,12 @@ void drawLoRaFocused(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x,
     char chUtilPercentage[10];
     snprintf(chUtilPercentage, sizeof(chUtilPercentage), "%2.0f%%", airTime->channelUtilizationPercent());
 
-    int chUtil_x = (SCREEN_WIDTH > 128) ? display->getStringWidth(chUtil) + 10 : display->getStringWidth(chUtil) + 5;
+    int chUtil_x = (isHighResolution) ? display->getStringWidth(chUtil) + 10 : display->getStringWidth(chUtil) + 5;
     int chUtil_y = getTextPositions(display)[line] + 3;
 
-    int chutil_bar_width = (SCREEN_WIDTH > 128) ? 100 : 50;
-    int chutil_bar_height = (SCREEN_WIDTH > 128) ? 12 : 7;
-    int extraoffset = (SCREEN_WIDTH > 128) ? 6 : 3;
+    int chutil_bar_width = (isHighResolution) ? 100 : 50;
+    int chutil_bar_height = (isHighResolution) ? 12 : 7;
+    int extraoffset = (isHighResolution) ? 6 : 3;
     int chutil_percent = airTime->channelUtilizationPercent();
 
     int centerofscreen = SCREEN_WIDTH / 2;
@@ -498,7 +483,7 @@ void drawLoRaFocused(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x,
 }
 
 // ****************************
-// *      Memory Screen       *
+// *      System Screen       *
 // ****************************
 void drawMemoryUsage(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {
@@ -516,7 +501,10 @@ void drawMemoryUsage(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x,
     int line = 1;
     const int barHeight = 6;
     const int labelX = x;
-    const int barsOffset = (SCREEN_WIDTH > 128) ? 24 : 0;
+    int barsOffset = (isHighResolution) ? 24 : 0;
+#ifdef USE_EINK
+    barsOffset -= 12;
+#endif
     const int barX = x + 40 + barsOffset;
 
     auto drawUsageRow = [&](const char *label, uint32_t used, uint32_t total, bool isHeap = false) {
@@ -526,7 +514,7 @@ void drawMemoryUsage(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x,
         int percent = (used * 100) / total;
 
         char combinedStr[24];
-        if (SCREEN_WIDTH > 128) {
+        if (isHighResolution) {
             snprintf(combinedStr, sizeof(combinedStr), "%s%3d%%  %u/%uKB", (percent > 80) ? "! " : "", percent, used / 1024,
                      total / 1024);
         } else {
@@ -605,7 +593,19 @@ void drawMemoryUsage(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x,
     }
     line += 1;
     char appversionstr[35];
-    snprintf(appversionstr, sizeof(appversionstr), "Ver.: %s", optstr(APP_VERSION));
+    snprintf(appversionstr, sizeof(appversionstr), "Ver: %s", optstr(APP_VERSION));
+    char appversionstr_formatted[40];
+    char *lastDot = strrchr(appversionstr, '.');
+    if (lastDot) {
+        size_t prefixLen = lastDot - appversionstr;
+        strncpy(appversionstr_formatted, appversionstr, prefixLen);
+        appversionstr_formatted[prefixLen] = '\0';
+        strncat(appversionstr_formatted, " (", sizeof(appversionstr_formatted) - strlen(appversionstr_formatted) - 1);
+        strncat(appversionstr_formatted, lastDot + 1, sizeof(appversionstr_formatted) - strlen(appversionstr_formatted) - 1);
+        strncat(appversionstr_formatted, ")", sizeof(appversionstr_formatted) - strlen(appversionstr_formatted) - 1);
+        strncpy(appversionstr, appversionstr_formatted, sizeof(appversionstr) - 1);
+        appversionstr[sizeof(appversionstr) - 1] = '\0';
+    }
     int textWidth = display->getStringWidth(appversionstr);
     int nameX = (SCREEN_WIDTH - textWidth) / 2;
     display->drawString(nameX, getTextPositions(display)[line], appversionstr);

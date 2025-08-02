@@ -6,10 +6,10 @@
 #include <pb.h>
 #include <vector>
 #include "meshtastic/channel.pb.h"
-#include "meshtastic/mesh.pb.h"
-#include "meshtastic/telemetry.pb.h"
 #include "meshtastic/config.pb.h"
 #include "meshtastic/localonly.pb.h"
+#include "meshtastic/mesh.pb.h"
+#include "meshtastic/telemetry.pb.h"
 
 #if PB_PROTO_HEADER_VERSION != 40
 #error Regenerate this file with the current version of nanopb generator.
@@ -362,7 +362,11 @@ extern const pb_msgdesc_t meshtastic_BackupPreferences_msg;
 #define MESHTASTIC_MESHTASTIC_DEVICEONLY_PB_H_MAX_SIZE meshtastic_BackupPreferences_size
 #define meshtastic_BackupPreferences_size        2271
 #define meshtastic_ChannelFile_size              718
+<<<<<<< HEAD
 #define meshtastic_DeviceState_size              1818
+=======
+#define meshtastic_DeviceState_size              1728
+>>>>>>> 1a8ab2aadc6adac01bbf5f5b186e0ca3d3382975
 #define meshtastic_NodeInfoLite_size             196
 #define meshtastic_PositionLite_size             28
 #define meshtastic_UserLite_size                 98

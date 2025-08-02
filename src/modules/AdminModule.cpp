@@ -43,6 +43,10 @@
 #if !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_I2C
 #include "motion/AccelerometerThread.h"
 #endif
+#if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040)) && !defined(CONFIG_IDF_TARGET_ESP32S2) &&               \
+    !defined(CONFIG_IDF_TARGET_ESP32C3)
+#include "SerialModule.h"
+#endif
 
 AdminModule *adminModule;
 bool hasOpenEditTransaction;
@@ -470,21 +474,37 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
             setPassKey(&res);
             myReply = allocDataProtobuf(res);
         } else if (mp.decoded.want_response) {
-            LOG_DEBUG("Did not responded to a request that wanted a respond. req.variant=%d", r->which_payload_variant);
+            LOG_DEBUG("Module API did not respond to admin message. req.variant=%d", r->which_payload_variant);
         } else if (handleResult != AdminMessageHandleResult::HANDLED) {
             // Probably a message sent by us or sent to our local node.  FIXME, we should avoid scanning these messages
-            LOG_DEBUG("Ignore irrelevant admin %d", r->which_payload_variant);
+            LOG_DEBUG("Module API did not handle admin message %d", r->which_payload_variant);
         }
         break;
+    }
+
+    // Allow any observers (e.g. the UI) to handle/respond
+    AdminMessageHandleResult observerResult = AdminMessageHandleResult::NOT_HANDLED;
+    meshtastic_AdminMessage observerResponse = meshtastic_AdminMessage_init_default;
+    AdminModule_ObserverData observerData = {
+        .request = r,
+        .response = &observerResponse,
+        .result = &observerResult,
+    };
+
+    notifyObservers(&observerData);
+
+    if (observerResult == AdminMessageHandleResult::HANDLED_WITH_RESPONSE) {
+        setPassKey(&observerResponse);
+        myReply = allocDataProtobuf(observerResponse);
+        LOG_DEBUG("Observer responded to admin message");
+    } else if (observerResult == AdminMessageHandleResult::HANDLED) {
+        LOG_DEBUG("Observer handled admin message");
     }
 
     // If asked for a response and it is not yet set, generate an 'ACK' response
     if (mp.decoded.want_response && !myReply) {
         myReply = allocErrorResponse(meshtastic_Routing_Error_NONE, &mp);
     }
-
-    // Allow any observers (e.g. the UI) to respond to this event
-    notifyObservers(r);
 
     return handled;
 }
@@ -580,7 +600,6 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
         if (config.device.button_gpio == c.payload_variant.device.button_gpio &&
             config.device.buzzer_gpio == c.payload_variant.device.buzzer_gpio &&
             config.device.role == c.payload_variant.device.role &&
-            config.device.disable_triple_click == c.payload_variant.device.disable_triple_click &&
             config.device.rebroadcast_mode == c.payload_variant.device.rebroadcast_mode) {
             requiresReboot = false;
         }
@@ -614,6 +633,7 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
 #if USERPREFS_EVENT_MODE
         // If we're in event mode, nobody is a Router or Repeater
         if (config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER ||
+            config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE ||
             config.device.role == meshtastic_Config_DeviceConfig_Role_REPEATER) {
             config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
         }
@@ -622,7 +642,16 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
     case meshtastic_Config_position_tag:
         LOG_INFO("Set config: Position");
         config.has_position = true;
+        // If we have turned off the GPS (disabled or not present) and we're not using fixed position,
+        // clear the stored position since it may not get updated
+        if (config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+            c.payload_variant.position.gps_mode != meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+            config.position.fixed_position == false && c.payload_variant.position.fixed_position == false) {
+            nodeDB->clearLocalPosition();
+            saveChanges(SEGMENT_NODEDATABASE | SEGMENT_CONFIG, false);
+        }
         config.position = c.payload_variant.position;
+
         // Save nodedb as well in case we got a fixed position packet
         break;
     case meshtastic_Config_power_tag:
@@ -782,8 +811,13 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
 
 bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
 {
-    if (!hasOpenEditTransaction)
+    // If we are in an open transaction or configuring MQTT or Serial (which have validation), defer disabling Bluetooth
+    // Otherwise, disable Bluetooth to prevent the phone from interfering with the config
+    if (!hasOpenEditTransaction &&
+        !IS_ONE_OF(c.which_payload_variant, meshtastic_ModuleConfig_mqtt_tag, meshtastic_ModuleConfig_serial_tag)) {
         disableBluetooth();
+    }
+
     switch (c.which_payload_variant) {
     case meshtastic_ModuleConfig_mqtt_tag:
 #if MESHTASTIC_EXCLUDE_MQTT
@@ -794,12 +828,22 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         if (!MQTT::isValidConfig(c.payload_variant.mqtt)) {
             return false;
         }
+        // Disable Bluetooth to prevent interference during MQTT configuration
+        disableBluetooth();
         moduleConfig.has_mqtt = true;
         moduleConfig.mqtt = c.payload_variant.mqtt;
 #endif
         break;
     case meshtastic_ModuleConfig_serial_tag:
         LOG_INFO("Set module config: Serial");
+#if (defined(ARCH_ESP32) || defined(ARCH_NRF52) || defined(ARCH_RP2040)) && !defined(CONFIG_IDF_TARGET_ESP32S2) &&               \
+    !defined(CONFIG_IDF_TARGET_ESP32C3)
+        if (!SerialModule::isValidConfig(c.payload_variant.serial)) {
+            LOG_ERROR("Invalid serial config");
+            return false;
+        }
+        disableBluetooth(); // Disable Bluetooth to prevent interference during Serial configuration
+#endif
         moduleConfig.has_serial = true;
         moduleConfig.serial = c.payload_variant.serial;
         break;
@@ -955,9 +999,10 @@ void AdminModule::handleGetConfig(const meshtastic_MeshPacket &req, const uint32
         // So even if we internally use 0 to represent 'use default' we still need to send the value we are
         // using to the app (so that even old phone apps work with new device loads).
         // r.get_radio_response.preferences.ls_secs = getPref_ls_secs();
-        // hideSecret(r.get_radio_response.preferences.wifi_ssid); // hmm - leave public for now, because only minimally private
-        // and useful for users to know current provisioning) hideSecret(r.get_radio_response.preferences.wifi_password);
-        // r.get_config_response.which_payloadVariant = Config_ModuleConfig_telemetry_tag;
+        // hideSecret(r.get_radio_response.preferences.wifi_ssid); // hmm - leave public for now, because only minimally
+        // private and useful for users to know current provisioning)
+        // hideSecret(r.get_radio_response.preferences.wifi_password); r.get_config_response.which_payloadVariant =
+        // Config_ModuleConfig_telemetry_tag;
         res.which_payload_variant = meshtastic_AdminMessage_get_config_response_tag;
         setPassKey(&res);
         myReply = allocDataProtobuf(res);
@@ -1041,9 +1086,10 @@ void AdminModule::handleGetModuleConfig(const meshtastic_MeshPacket &req, const 
         // So even if we internally use 0 to represent 'use default' we still need to send the value we are
         // using to the app (so that even old phone apps work with new device loads).
         // r.get_radio_response.preferences.ls_secs = getPref_ls_secs();
-        // hideSecret(r.get_radio_response.preferences.wifi_ssid); // hmm - leave public for now, because only minimally private
-        // and useful for users to know current provisioning) hideSecret(r.get_radio_response.preferences.wifi_password);
-        // r.get_config_response.which_payloadVariant = Config_ModuleConfig_telemetry_tag;
+        // hideSecret(r.get_radio_response.preferences.wifi_ssid); // hmm - leave public for now, because only minimally
+        // private and useful for users to know current provisioning)
+        // hideSecret(r.get_radio_response.preferences.wifi_password); r.get_config_response.which_payloadVariant =
+        // Config_ModuleConfig_telemetry_tag;
         res.which_payload_variant = meshtastic_AdminMessage_get_module_config_response_tag;
         setPassKey(&res);
         myReply = allocDataProtobuf(res);
@@ -1174,7 +1220,7 @@ void AdminModule::reboot(int32_t seconds)
 {
     LOG_INFO("Reboot in %d seconds", seconds);
     if (screen)
-        screen->showOverlayBanner("Rebooting...", 0); // stays on screen
+        screen->showSimpleBanner("Rebooting...", 0); // stays on screen
     rebootAtMsec = (seconds < 0) ? 0 : (millis() + seconds * 1000);
 }
 
@@ -1309,12 +1355,6 @@ void AdminModule::handleSendInputEvent(const meshtastic_AdminMessage_InputEvent 
 {
     LOG_DEBUG("Processing input event: event_code=%u, kb_char=%u, touch_x=%u, touch_y=%u", inputEvent.event_code,
               inputEvent.kb_char, inputEvent.touch_x, inputEvent.touch_y);
-
-    // Validate input parameters
-    if (inputEvent.event_code > INPUT_BROKER_ANYKEY) {
-        LOG_WARN("Invalid input event code: %u", inputEvent.event_code);
-        return;
-    }
 
     // Create InputEvent for injection
     InputEvent event = {.inputEvent = (input_broker_event)inputEvent.event_code,
