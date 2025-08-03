@@ -133,21 +133,16 @@ typedef enum _meshtastic_PortNum {
     /* Reticulum Network Stack Tunnel App
  ENCODING: Fragmented RNS Packet. Handled by Meshtastic RNS interface */
     meshtastic_PortNum_RETICULUM_TUNNEL_APP = 76,
-<<<<<<< HEAD
-    /* Friend Finder App
- This app is used to establish and maintain a tracking session between two nodes.
- It uses the FriendFinder message defined in friendfinder.proto.
- ENCODING: Protobuf */
-    meshtastic_PortNum_FRIEND_FINDER_APP = 78,
-=======
     /* App for transporting Cayenne Low Power Payload, popular for LoRaWAN sensor nodes. Offers ability to send
  arbitrary telemetry over meshtastic that is not covered by telemetry.proto
  ENCODING: CayenneLLP */
     meshtastic_PortNum_CAYENNE_APP = 77,
->>>>>>> 1a8ab2aadc6adac01bbf5f5b186e0ca3d3382975
+
+    meshtastic_PortNum_FRIEND_FINDER_APP = 157,
     /* Private applications should use portnums >= 256.
  To simplify initial development and testing you can use "PRIVATE_APP"
  in your code without needing to rebuild protobuf files (via [regen-protos.sh](https://github.com/meshtastic/firmware/blob/master/bin/regen-protos.sh)) */
+
     meshtastic_PortNum_PRIVATE_APP = 256,
     /* ATAK Forwarder Module https://github.com/paulmandal/atak-forwarder
  ENCODING: libcotshrink */

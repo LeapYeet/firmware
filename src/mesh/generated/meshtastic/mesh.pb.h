@@ -11,11 +11,8 @@
 #include "meshtastic/portnums.pb.h"
 #include "meshtastic/telemetry.pb.h"
 #include "meshtastic/xmodem.pb.h"
-<<<<<<< HEAD
 #include "meshtastic/device_ui.pb.h"
 #include "meshtastic/friendfinder.pb.h"
-=======
->>>>>>> 1a8ab2aadc6adac01bbf5f5b186e0ca3d3382975
 
 #if PB_PROTO_HEADER_VERSION != 40
 #error Regenerate this file with the current version of nanopb generator.

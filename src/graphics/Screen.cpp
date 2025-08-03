@@ -1368,38 +1368,7 @@ int Screen::handleInputEvent(const InputEvent *event)
                 showNextFrame();
             } else if (event->inputEvent == INPUT_BROKER_SELECT) {
                 if (this->ui->getUiState()->currentFrame == framesetInfo.positions.home) {
-<<<<<<< HEAD
-                    const char *banner_message;
-                    int options;
-                    if (kb_found) {
-                        banner_message = "Action?\nBack\nSleep Screen\nNew Preset Msg\nNew Freetext Msg\nFriend Finder";
-                        options = 5;
-                    } else {
-                        banner_message = "Action?\nBack\nSleep Screen\nNew Preset Msg\nFriend Finder";
-                        options = 4;
-                    }
-                    showOverlayBanner(banner_message, 30000, options, [](int selected) -> void {
-                        if (selected == 1) {
-                            screen->setOn(false);
-                        } else if (selected == 2) {
-                            LOG_DEBUG("Launch canned message WITHOUT KEYBOARD");
-                            cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
-                        } else if (selected == 3 && kb_found) {
-                            LOG_DEBUG("Launch canned message WITH KEYBOARD");
-                            cannedMessageModule->LaunchFreetextWithDestination(NODENUM_BROADCAST);
-                        }else if (selected == 3 && !kb_found) {
-                            LOG_DEBUG("Launch Friend Finder");
-                            friendFinderModule->launchMenu(); 
-                        }
-                        else if (selected == 4 && kb_found) {
-                            LOG_DEBUG("Launch Friend Finder");
-                            friendFinderModule->launchMenu();
-                        }
-                    });
-#if HAS_TFT
-=======
                     menuHandler::homeBaseMenu();
->>>>>>> 1a8ab2aadc6adac01bbf5f5b186e0ca3d3382975
                 } else if (this->ui->getUiState()->currentFrame == framesetInfo.positions.memory) {
                     menuHandler::systemBaseMenu();
 #if HAS_GPS

@@ -15,8 +15,10 @@
 #include "modules/CannedMessageModule.h"
 #include "modules/KeyVerificationModule.h"
 #include "modules/TraceRouteModule.h"
+#include "modules/FriendFinderModule.h" 
 
 extern uint16_t TFT_MESH;
+extern FriendFinderModule* friendFinderModule;
 
 namespace graphics
 {
@@ -294,7 +296,8 @@ void menuHandler::messageResponseMenu()
 
 void menuHandler::homeBaseMenu()
 {
-    enum optionsNumbers { Back, Backlight, Position, Preset, Freetext, Bluetooth, Sleep, enumEnd };
+    // 1. Add your new option to the enum
+    enum optionsNumbers { Back, Backlight, Position, Preset, Freetext, FriendFinder, Bluetooth, Sleep, enumEnd };
 
     static const char *optionsArray[enumEnd] = {"Back"};
     static int optionsEnumArray[enumEnd] = {Back};
@@ -316,6 +319,11 @@ void menuHandler::homeBaseMenu()
         optionsArray[options] = "New Freetext Msg";
         optionsEnumArray[options++] = Freetext;
     }
+    
+    // 2. Add your "Friend Finder" to the options arrays
+    optionsArray[options] = "Friend Finder";
+    optionsEnumArray[options++] = FriendFinder;
+
     optionsArray[options] = "Bluetooth Toggle";
     optionsEnumArray[options++] = Bluetooth;
 
@@ -342,6 +350,11 @@ void menuHandler::homeBaseMenu()
             cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
         } else if (selected == Freetext) {
             cannedMessageModule->LaunchFreetextWithDestination(NODENUM_BROADCAST);
+        } 
+        // 3. Add the logic to handle your selection
+        else if (selected == FriendFinder) {
+            LOG_DEBUG("Launch Friend Finder");
+            friendFinderModule->launchMenu();
         } else if (selected == Bluetooth) {
             menuQueue = bluetooth_toggle_menu;
             screen->runNow();
@@ -349,7 +362,6 @@ void menuHandler::homeBaseMenu()
     };
     screen->showOverlayBanner(bannerOptions);
 }
-
 void menuHandler::textMessageBaseMenu()
 {
     enum optionsNumbers { Back, Preset, Freetext, enumEnd };

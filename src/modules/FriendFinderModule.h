@@ -1,99 +1,109 @@
-// In src/modules/FriendFinderModule.h
 #pragma once
 
 #include "MeshModule.h"
 #include "ProtobufModule.h"
 #include "concurrency/OSThread.h"
-#include "Observer.h"                         // UIFrameEvent / Observable
-#include "input/InputBroker.h"                // InputEvent
+#include "Observer.h"
+#include "input/InputBroker.h"
 #include "mesh/generated/meshtastic/mesh.pb.h"
 #include "mesh/generated/meshtastic/friendfinder.pb.h"
 
-// Forward declarations ---------------------------------------------------------
 class MeshService;
 
-/*---------------------------------------------------------------------------*/
-/* */
-/* Friend-Finder state machine                                              */
-/* */
-/*---------------------------------------------------------------------------*/
-enum class FriendFinderState {
-    IDLE,               // default Meshtastic carousel
-    MENU_SELECTION,     // scrollable FF menu (Back, Start Pairing, …)
-    SENDING_REQUEST,    // pairing broadcast sent
-    AWAITING_RESPONSE,  // waiting for a friend to accept/reject our request
-    AWAITING_CONFIRMATION, // waiting for the local user to confirm a friend's request
-    TRACKING_TARGET,    // we are tracking a friend
-    BEING_TRACKED       // someone is tracking us
+enum class FriendFinderState : uint8_t {
+    IDLE = 0,
+    MENU_SELECTION,
+    AWAITING_RESPONSE,
+    AWAITING_CONFIRMATION,
+    TRACKING_TARGET,
+    BEING_TRACKED,
+    TRACKING_MENU
 };
 
-/*---------------------------------------------------------------------------*/
-/* FriendFinderModule                                                       */
-/*---------------------------------------------------------------------------*/
 class FriendFinderModule
-        : public ProtobufModule<meshtastic_FriendFinder>,
-          public concurrency::OSThread,
-          public Observable<const UIFrameEvent *>
+  : public ProtobufModule<meshtastic_FriendFinder>,
+    public concurrency::OSThread,
+    public Observable<const UIFrameEvent *>
 {
 public:
     FriendFinderModule();
 
-    /* — ProtobufModule overrides — */
-    bool handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
-                                meshtastic_FriendFinder *ff) override;
-
-    /* — MeshModule overrides — */
-    void    setup()   override;
+    bool    handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
+                                   meshtastic_FriendFinder *ff) override;
+    void    setup() override;
     int32_t runOnce() override;
 
-    /* — UI frame integration — */
 #if HAS_SCREEN
-    bool wantUIFrame() override { return shouldDraw() ||
-                                          currentState == FriendFinderState::MENU_SELECTION; }
+    bool wantUIFrame() override {
+        // Only ask for a UI frame when we actually display something
+        return shouldDraw();
+    }
     void drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state,
                    int16_t x, int16_t y) override;
     Observable<const UIFrameEvent *> *getUIFrameObservable() override { return this; }
 #endif
 
-    bool interceptingKeyboardInput() override
-    { return currentState == FriendFinderState::MENU_SELECTION || shouldDraw(); }
+    bool interceptingKeyboardInput() override {
+        return shouldDraw();
+    }
 
-    /* — Public helpers called from Screen.cpp — */
-    void launchMenu();          // open FF main menu
-    void beginPairing();        // Start Pairing command action
-
-protected:
-    int  handleInputEvent(const InputEvent *ev);
+    void launchMenu();
+    void beginPairing();
 
 private:
-    /* ---------------------------------------------------------------------- */
-    MeshService *service = nullptr;
+    // -------- persist friends --------
+    struct FriendRecord {
+        uint32_t node;
+        uint32_t session_id;
+        uint8_t  secret[16];
+        bool     used;
+    };
+    static constexpr int MAX_FRIENDS = 8;
+    FriendRecord friends_[MAX_FRIENDS]{};
+    void loadFriends();
+    void saveFriends();
+    int  findFriend(uint32_t node) const;
+    void upsertFriend(uint32_t node, uint32_t session_id, const uint8_t secret[16]);
 
+private:
     FriendFinderState currentState = FriendFinderState::IDLE;
+    FriendFinderState previousState = FriendFinderState::IDLE;
 
-    uint32_t          targetNodeNum        = 0;
-    uint32_t          pendingPairRequestFrom = 0; // Temp store for the node that sent us a request
+    uint32_t          targetNodeNum = 0;
     meshtastic_FriendFinder lastFriendData {};
     uint32_t          lastFriendPacketTime = 0;
     uint32_t          lastSentPacketTime   = 0;
 
-    /* scrollable menu bookkeeping */
-    static constexpr int NUM_MENU = 6;
+    // Pairing window
+    bool              pairingWindowOpen = false;
+    uint32_t          pairingWindowExpiresAt = 0;
+    static constexpr uint32_t PAIRING_WINDOW_MS = 30000;
+
+    // Main menu
+    static constexpr int NUM_MENU = 4; // Back/Exit, Start Pairing, Track Friend, List Friends
     int  menuIndex = 0;
 
-    /* Input observer (buttons/encoder) */
+    // Overlay (while tracking)
+    static constexpr int NUM_OVERLAY = 2; // Stop Tracking, Back
+    int  overlayIndex = 0;
+
+    // Input handling
     CallbackObserver<FriendFinderModule, const InputEvent *> inputObserver {
         this, &FriendFinderModule::handleInputEvent };
 
-    /* Helpers */
+    int  handleInputEvent(const InputEvent *ev);
+
+    // Helpers
     void sendFriendFinderPacket(uint32_t dst,
                                 meshtastic_FriendFinder_RequestType type,
                                 uint8_t hopLimit = 0);
+    void startTracking(uint32_t nodeNum);
+    void endSession(bool notifyPeer);
     void raiseUIEvent(UIFrameEvent::Action a, bool focus = false);
-    bool shouldDraw();      // compass page active?
-    const char *getNodeName(uint32_t nodeNum); // Add this function declaration
+    bool shouldDraw();
+    const char *getNodeName(uint32_t nodeNum);
 
     static FriendFinderModule *instance;
 };
-/* Global pointer so UI / Screen.cpp can talk to us */
+
 extern FriendFinderModule *friendFinderModule;

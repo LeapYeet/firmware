@@ -211,6 +211,7 @@ bool MeshService::cancelSending(PacketId id)
 
 ErrorCode MeshService::sendQueueStatusToPhone(const meshtastic_QueueStatus &qs, ErrorCode res, uint32_t mesh_packet_id)
 {
+     return ERRNO_OK;
     meshtastic_QueueStatus *copied = queueStatusPool.allocCopy(qs);
 
     copied->res = res;
