@@ -1058,6 +1058,7 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
 
     truncName(peerName, nameBuf, sizeof(nameBuf), 12);
 
+    // Distance and Bearing
     bool havePeerPos = (peerData.latitude_i != 0 || peerData.longitude_i != 0);
     bool haveBoth = haveFix && havePeerPos;
     float bearingDeg = 0;
