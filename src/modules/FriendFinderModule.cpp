@@ -4,7 +4,7 @@
 #include "GPS.h"
 #include "Power.h"
 #include "TypeConversions.h"
-
+#include "MagnetometerModule.h"
 #include "graphics/Screen.h"
 #include "graphics/draw/CompassRenderer.h"
 #include "graphics/draw/NotificationRenderer.h"
@@ -21,7 +21,9 @@
 #include "pb_decode.h"
 
 #define FRIEND_FINDER_PORTNUM meshtastic_PortNum_FRIEND_FINDER_APP
-#define UPDATE_INTERVAL       10    // seconds
+#define UPDATE_INTERVAL       30    // seconds
+#define HIGH_GPS_INTERVAL     2     // seconds
+#define DEFAULT_GPS_INTERVAL  300   // 5 minutes
 
 /* Optional persistence via ESP32 NVS */
 #if defined(ARDUINO_ARCH_ESP32)
@@ -81,6 +83,13 @@ void FriendFinderModule::setup() {
     LOG_INFO("[FriendFinder] setup()");
     LOG_INFO("[FriendFinder] build=%s %s", __DATE__, __TIME__);
     LOG_INFO("[FriendFinder] FRIEND_FINDER_PORTNUM=%u", (unsigned)FRIEND_FINDER_PORTNUM);
+
+    // Failsafe: If we boot up and find GPS in high-power mode, assume we crashed and restore it.
+    if (config.position.gps_update_interval > 0 && config.position.gps_update_interval <= HIGH_GPS_INTERVAL) {
+        LOG_WARN("[FriendFinder] GPS interval is low (%d sec), restoring default. Was device rebooted during a session?", config.position.gps_update_interval);
+        config.position.gps_update_interval = DEFAULT_GPS_INTERVAL;
+        service->reloadConfig(SEGMENT_CONFIG);
+    }
 }
 
 /* ---------- Friend store (persist up to MAX_FRIENDS) ---------- */
@@ -131,6 +140,26 @@ void FriendFinderModule::upsertFriend(uint32_t node, uint32_t session_id, const 
     LOG_INFO("[FriendFinder] Saved friend 0x%08x at slot %d", (unsigned)node, idx);
 }
 
+/* ---------- GPS Mode Control ---------- */
+void FriendFinderModule::activateHighGpsMode() {
+    if (!isGpsHighPower && config.position.gps_update_interval != HIGH_GPS_INTERVAL) {
+        LOG_INFO("[FriendFinder] Activating high-power GPS mode.");
+        originalGpsUpdateInterval = config.position.gps_update_interval;
+        config.position.gps_update_interval = HIGH_GPS_INTERVAL;
+        service->reloadConfig(SEGMENT_CONFIG);
+        isGpsHighPower = true;
+    }
+}
+
+void FriendFinderModule::restoreNormalGpsMode() {
+    if (isGpsHighPower) {
+        LOG_INFO("[FriendFinder] Restoring normal GPS mode.");
+        config.position.gps_update_interval = originalGpsUpdateInterval;
+        service->reloadConfig(SEGMENT_CONFIG);
+        isGpsHighPower = false;
+    }
+}
+
 /* ---------- UI entry points ---------- */
 void FriendFinderModule::launchMenu()
 {
@@ -165,6 +194,8 @@ void FriendFinderModule::startTracking(uint32_t nodeNum)
     if (findFriend(nodeNum) >= 0) {
         LOG_INFO("[FriendFinder] startTracking(): already friends with 0x%08x -> start immediately", nodeNum);
         currentState = FriendFinderState::TRACKING_TARGET;
+        previousDistance = -1.0f; // Reset distance trend
+        activateHighGpsMode(); // Activate real-time GPS
         lastSentPacketTime = 0; // force quick first beacon
 #if HAS_SCREEN
         screen->showSimpleBanner("Tracking started", 1200);
@@ -193,6 +224,8 @@ void FriendFinderModule::endSession(bool notifyPeer)
     targetNodeNum = 0;
     pairingWindowOpen = false;
     currentState = FriendFinderState::IDLE;
+    previousDistance = -1.0f; // Reset distance trend
+    restoreNormalGpsMode(); // Restore original GPS settings
     raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
 }
 
@@ -367,12 +400,14 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
         if (findFriend(from) >= 0) {
             targetNodeNum = from;
             currentState  = FriendFinderState::BEING_TRACKED;
+            previousDistance = -1.0f; // Reset distance trend
+            activateHighGpsMode(); // Activate real-time GPS
             pairingWindowOpen = false;
             LOG_INFO("[FriendFinder] REQUEST from existing friend -> ACCEPT");
             sendFriendFinderPacket(from, meshtastic_FriendFinder_RequestType_ACCEPT);
 #if HAS_SCREEN
-            char msg[64]; snprintf(msg, sizeof(msg), "Paired (saved) with %s", getNodeName(from));
-            screen->showSimpleBanner(msg, 1200);
+            // Simply showing the UI is notification enough
+            raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
 #endif
             return true;
         }
@@ -387,6 +422,8 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
         // Mutual pairing: save friend, accept, and enter session
         targetNodeNum = from;
         currentState  = FriendFinderState::BEING_TRACKED;
+        previousDistance = -1.0f; // Reset distance trend
+        activateHighGpsMode(); // Activate real-time GPS
         pairingWindowOpen = false;
 
         uint32_t sess = (uint32_t)random(1, 0x7fffffff);
@@ -397,9 +434,7 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
         sendFriendFinderPacket(from, meshtastic_FriendFinder_RequestType_ACCEPT);
 
 #if HAS_SCREEN
-        char bannerMsg[96];
-        snprintf(bannerMsg, sizeof(bannerMsg), "Paired with %s", getNodeName(from));
-        screen->showSimpleBanner(bannerMsg, 1200);
+        // Show the UI instead of just a banner
         raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
 #endif
         break;
@@ -409,6 +444,8 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
         if (currentState == FriendFinderState::AWAITING_RESPONSE) {
             targetNodeNum = from;
             currentState  = FriendFinderState::TRACKING_TARGET;
+            previousDistance = -1.0f; // Reset distance trend
+            activateHighGpsMode(); // Activate real-time GPS
             pairingWindowOpen = false;
             lastFriendPacketTime = millis();
             lastFriendData = *ff;
@@ -419,9 +456,6 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
             upsertFriend(from, sess, sec);
 
 #if HAS_SCREEN
-            char bannerMsg[96];
-            snprintf(bannerMsg, sizeof(bannerMsg), "Paired with %s", getNodeName(from));
-            screen->showSimpleBanner(bannerMsg, 1200);
             raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
 #endif
         }
@@ -539,21 +573,8 @@ void FriendFinderModule::raiseUIEvent(UIFrameEvent::Action a, bool focus)
 
 // --- helpers (drawing only) ---
 
-static inline const char* truncName(const char* s, char* out, size_t outsz, int maxChars)
-{
-    if (!s) s = "Friend";
-    size_t n = strnlen(s, outsz - 1);
-    if ((int)n <= maxChars) { strlcpy(out, s, outsz); return out; }
-    if (maxChars <= 1) { strlcpy(out, s, outsz); return out; }
-    size_t keep = (size_t)maxChars - 1;
-    memcpy(out, s, keep);
-    out[keep] = '\xEF'; // '…' fallback glyph if needed
-    out[keep + 1] = 0;
-    return out;
-}
-
-// Minimal, fast in-frame menu (no full-width fill; pointer glyph instead)
-static void drawMenuList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
+// This is now a member function
+void FriendFinderModule::drawMenuList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
                          const char* const* rows, int N, int sel)
 {
     d->setFont(FONT_SMALL);
@@ -577,8 +598,23 @@ static void drawMenuList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
     }
 }
 
-// Redesigned session page for TRACKING_TARGET / BEING_TRACKED
-static void drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
+// C-style helper for truncating names
+static inline const char* truncName(const char* s, char* out, size_t outsz, int maxChars)
+{
+    if (!s) s = "Friend";
+    size_t n = strnlen(s, outsz - 1);
+    if ((int)n <= maxChars) { strlcpy(out, s, outsz); return out; }
+    if (maxChars <= 1) { strlcpy(out, s, outsz); return out; }
+    size_t keep = (size_t)maxChars - 1;
+    memcpy(out, s, keep);
+    out[keep] = '\xEF'; // '…' fallback glyph if needed
+    out[keep + 1] = 0;
+    return out;
+}
+
+
+// This is now a member function to access `this->previousDistance`
+void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
                             const char* peerName,
                             const meshtastic_FriendFinder& peerData,
                             bool haveFix,
@@ -586,91 +622,106 @@ static void drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
                             uint32_t ageSec, uint32_t lastFriendPacketTime)
 {
     d->setFont(FONT_SMALL);
-    char buf[64];
     char nameBuf[24];
+    char distBuf[16], bearingBuf[16], agoBuf[16], batBuf[16], satsBuf[16];
 
-    // --- Header ---
+    // --- Prepare all text strings first ---
+    // Peer Name
     truncName(peerName, nameBuf, sizeof(nameBuf), 12);
-    snprintf(buf, sizeof(buf), "Tracking: %s", nameBuf);
-    d->setTextAlignment(TEXT_ALIGN_CENTER);
-    d->drawString(x + W / 2, y, buf);
-    d->drawLine(x + 4, y + FONT_HEIGHT_SMALL + 2, x + W - 4, y + FONT_HEIGHT_SMALL + 2);
 
-    const int headerH = FONT_HEIGHT_SMALL + 4;
-    const int footerH = FONT_HEIGHT_SMALL * 2 + 4;
-    const int contentH = H - headerH - footerH;
-    
-    // --- Arrow Area ---
-    const int r = std::min(W / 2 - 4, contentH / 2 - 4);
-    const int cx = x + W / 2;
-    const int cy = y + headerH + contentH / 2; // Vertically center in the content area
-
+    // Distance and Bearing
     bool havePeerPos = (peerData.latitude_i != 0 || peerData.longitude_i != 0);
     bool haveBoth = haveFix && havePeerPos;
     float bearingDeg = 0;
-
     if (haveBoth) {
-        const float headingRad = screen->hasHeading() ? screen->getHeading() * PI / 180
-                                                  : screen->estimatedHeading(DegD(myLat), DegD(myLon));
         GeoCoord me(myLat, myLon, 0);
         GeoCoord fr(peerData.latitude_i, peerData.longitude_i, 0);
-        float bearingRad = me.bearingTo(fr);
-        bearingDeg = bearingRad * 180 / PI; if (bearingDeg < 0) bearingDeg += 360;
+        float currentDistance = me.distanceTo(fr);
+        bearingDeg = me.bearingTo(fr) * 180 / PI; if (bearingDeg < 0) bearingDeg += 360;
+        
+        // Prepare trend indicator
+        char trendIndicator[3] = " "; // Space, up/down arrow, null terminator
+        if(previousDistance >= 0.0f) {
+            if(currentDistance < previousDistance - 0.5f) trendIndicator[0] = 25; // Down arrow
+            else if (currentDistance > previousDistance + 0.5f) trendIndicator[0] = 24; // Up arrow
+        }
+        previousDistance = currentDistance; // Update for next frame
+        
+        if (config.display.units == meshtastic_Config_DisplayConfig_DisplayUnits_IMPERIAL) {
+            float feet = currentDistance * METERS_TO_FEET;
+            if (feet < 1000) snprintf(distBuf, sizeof(distBuf), "%.0fft%s", feet, trendIndicator);
+            else snprintf(distBuf, sizeof(distBuf), "%.1fmi%s", feet / MILES_TO_FEET, trendIndicator);
+        } else {
+            if (currentDistance < 1000) snprintf(distBuf, sizeof(distBuf), "%.0fm%s", currentDistance, trendIndicator);
+            else snprintf(distBuf, sizeof(distBuf), "%.1fkm%s", currentDistance / 1000, trendIndicator);
+        }
+        snprintf(bearingBuf, sizeof(bearingBuf), "%.0fdeg", bearingDeg);
+    } else {
+        strlcpy(distBuf, "Dist --", sizeof(distBuf));
+        strlcpy(bearingBuf, "Brg --", sizeof(bearingBuf));
+        previousDistance = -1.0f; // Invalidate distance if we lose fix
+    }
+
+    // Peer Stats
+    snprintf(batBuf, sizeof(batBuf), "%u%% Bat", (unsigned)peerData.battery_level);
+    snprintf(satsBuf, sizeof(satsBuf), "%u Sats", (unsigned)peerData.sats_in_view);
+
+    // Last Update Time
+    if (lastFriendPacketTime == 0) {
+        strlcpy(agoBuf, "waiting...", sizeof(agoBuf));
+    } else if (ageSec > 999) {
+        strlcpy(agoBuf, ">999s ago", sizeof(agoBuf));
+    } else {
+        snprintf(agoBuf, sizeof(agoBuf), "%lus ago", ageSec);
+    }
+    
+    // --- Drawing ---
+    // Layout Constants
+    const int headerH = FONT_HEIGHT_SMALL + 4;
+    const int footerH = (FONT_HEIGHT_SMALL * 2) + 6;
+    const int contentH = H - headerH - footerH;
+
+    // Header
+    char titleBuf[48];
+    snprintf(titleBuf, sizeof(titleBuf), "Tracking: %s", nameBuf);
+    d->setTextAlignment(TEXT_ALIGN_CENTER);
+    d->drawString(x + W / 2, y, titleBuf);
+    d->drawLine(x + 4, y + FONT_HEIGHT_SMALL + 2, x + W - 4, y + FONT_HEIGHT_SMALL + 2);
+
+    // Arrow (or placeholder) in the main content area
+    const int r = std::min(W / 2 - 4, contentH / 2 - 4);
+    const int cx = x + W / 2;
+    const int cy = y + headerH + contentH / 2;
+    if (haveBoth) {
+        const float headingRad = magnetometerModule->hasHeading() ? magnetometerModule->getHeading() * M_PI / 180.0f : 0.0f;
+
         float arrowTheta = (bearingDeg * PI / 180.0f);
         if (config.display.compass_north_top == false) arrowTheta -= headingRad;
-        graphics::CompassRenderer::drawNodeHeading(d, cx, cy, r, arrowTheta);
+        graphics::CompassRenderer::drawNodeHeading(d, cx, cy, r * 1.2f, arrowTheta); // Made arrow slightly larger
     } else {
-        // Show a placeholder when we can't draw an arrow
         d->setTextAlignment(TEXT_ALIGN_CENTER);
         d->setFont(FONT_LARGE);
         d->drawString(cx, cy - (FONT_HEIGHT_LARGE / 2), "?");
-        d->setFont(FONT_SMALL); // Reset font
+        d->setFont(FONT_SMALL);
     }
 
-    // --- Data Area (at the bottom) ---
-    const int dataY = y + H - footerH;
-    
-    // Column 1: Distance & Bearing
+    // Footer with two rows of data
+    const int footerY1 = y + H - (FONT_HEIGHT_SMALL * 2) - 2;
+    const int footerY2 = y + H - FONT_HEIGHT_SMALL;
+
+    // Footer Line 1
     d->setTextAlignment(TEXT_ALIGN_LEFT);
-    if (haveBoth) {
-        GeoCoord me(myLat, myLon, 0);
-        GeoCoord fr(peerData.latitude_i, peerData.longitude_i, 0);
-        float meters = me.distanceTo(fr);
-        
-        if (config.display.units == meshtastic_Config_DisplayConfig_DisplayUnits_IMPERIAL) {
-            float feet = meters * METERS_TO_FEET;
-            if (feet < 1000) snprintf(buf, sizeof(buf), "%.0fft", feet);
-            else snprintf(buf, sizeof(buf), "%.1fmi", feet / MILES_TO_FEET);
-        } else {
-            if (meters < 1000) snprintf(buf, sizeof(buf), "%.0fm", meters);
-            else snprintf(buf, sizeof(buf), "%.1fkm", meters / 1000);
-        }
-        d->drawString(x + 4, dataY, buf);
-        snprintf(buf, sizeof(buf), "%.0f%c", bearingDeg, 247); // Degree symbol
-        d->drawString(x + 4, dataY + FONT_HEIGHT_SMALL + 2, buf);
-    } else {
-        d->drawString(x + 4, dataY, "Dist --");
-        d->drawString(x + 4, dataY + FONT_HEIGHT_SMALL + 2, "Brg --");
-    }
-
-    // Column 2: Peer stats
-    d->setTextAlignment(TEXT_ALIGN_RIGHT);
-    snprintf(buf, sizeof(buf), "%u%% Bat", (unsigned)peerData.battery_level);
-    d->drawString(x + W - 4, dataY, buf);
-    snprintf(buf, sizeof(buf), "%u Sats", (unsigned)peerData.sats_in_view);
-    d->drawString(x + W - 4, dataY + FONT_HEIGHT_SMALL + 2, buf);
-
-    // --- Footer ---
+    d->drawString(x + 4, footerY1, distBuf);
     d->setTextAlignment(TEXT_ALIGN_CENTER);
-    if (ageSec > 999) {
-        snprintf(buf, sizeof(buf), "DC");
-    } else if (lastFriendPacketTime != 0) {
-        snprintf(buf, sizeof(buf), "%lus ago", ageSec);
-    } else {
-        snprintf(buf, sizeof(buf), "???");
-    }
-    const int finalLineY = y + H - (FONT_HEIGHT_SMALL * 2) - 1;
-    d->drawString(x + W/2, finalLineY, buf);
+    d->drawString(x + W/2, footerY1, agoBuf);
+    d->setTextAlignment(TEXT_ALIGN_RIGHT);
+    d->drawString(x + W - 4, footerY1, batBuf);
+    
+    // Footer Line 2
+    d->setTextAlignment(TEXT_ALIGN_LEFT);
+    d->drawString(x + 4, footerY2, bearingBuf);
+    d->setTextAlignment(TEXT_ALIGN_RIGHT);
+    d->drawString(x + W - 4, footerY2, satsBuf);
 }
 
 void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
@@ -681,14 +732,14 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
     // Fast in-frame menu
     if (currentState == FriendFinderState::MENU_SELECTION) {
         static const char* rows[NUM_MENU] = {"Back/Exit", "Start Pairing", "Track Friend", "List Friends"};
-        drawMenuList(display, x, y, W, H, rows, NUM_MENU, menuIndex);
+        this->drawMenuList(display, x, y, W, H, rows, NUM_MENU, menuIndex);
         return;
     }
     
     // New In-session Menu
     if (currentState == FriendFinderState::TRACKING_MENU) {
         static const char* rows[NUM_OVERLAY] = {"Stop Tracking", "Back"};
-        drawMenuList(display, x, y, W, H, rows, NUM_OVERLAY, overlayIndex);
+        this->drawMenuList(display, x, y, W, H, rows, NUM_OVERLAY, overlayIndex);
         return;
     }
 
@@ -721,7 +772,7 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
             ageSec = (now >= lastFriendPacketTime) ? ((now - lastFriendPacketTime) / 1000U) : 0;
         }
 
-        drawSessionPage(display, x, y, W, H, peerName, lastFriendData,
+        this->drawSessionPage(display, x, y, W, H, peerName, lastFriendData,
                         haveFix, myLat, myLon, ageSec, this->lastFriendPacketTime);
     }
 }

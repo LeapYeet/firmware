@@ -86,6 +86,15 @@ private:
     // Overlay (while tracking)
     static constexpr int NUM_OVERLAY = 2; // Stop Tracking, Back
     int  overlayIndex = 0;
+    
+    // GPS high-power mode management
+    bool isGpsHighPower = false;
+    uint32_t originalGpsUpdateInterval = 0;
+    void activateHighGpsMode();
+    void restoreNormalGpsMode();
+    
+    // Distance trend tracking
+    float previousDistance = -1.0f;
 
     // Input handling
     CallbackObserver<FriendFinderModule, const InputEvent *> inputObserver {
@@ -102,6 +111,18 @@ private:
     void raiseUIEvent(UIFrameEvent::Action a, bool focus = false);
     bool shouldDraw();
     const char *getNodeName(uint32_t nodeNum);
+    
+#if HAS_SCREEN
+    // Drawing helpers are now member functions to access state
+    void drawMenuList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
+                      const char* const* rows, int N, int sel);
+    void drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
+                         const char* peerName,
+                         const meshtastic_FriendFinder& peerData,
+                         bool haveFix,
+                         int32_t myLat, int32_t myLon,
+                         uint32_t ageSec, uint32_t lastFriendPacketTime);
+#endif
 
     static FriendFinderModule *instance;
 };
