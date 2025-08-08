@@ -159,6 +159,28 @@ int FriendFinderModule::findFriend(uint32_t node) const {
 }
 
 void FriendFinderModule::upsertFriend(uint32_t node, uint32_t session_id, const uint8_t secret[16]) {
+    // SECURITY NOTE:
+    // The current implementation has a significant flaw. Each device generates its own
+    // secret locally and never exchanges it with the peer. This means the `secret`
+    // field is currently unused for authentication.
+    //
+    // A robust implementation would require modifying the FriendFinder protobuf definition
+    // to add two fields:
+    //  1. `bytes shared_secret = X;` // For the pairing handshake
+    //  2. `bytes payload_hash = Y;`  // For authenticating every subsequent message
+    //
+    // The proper flow would be:
+    // 1. Initiator sends REQUEST.
+    // 2. Acceptor generates a new random secret, saves it, and sends it back inside
+    //    the ACCEPT message using the new `shared_secret` protobuf field.
+    // 3. Initiator receives ACCEPT, extracts the secret, and saves it.
+    // 4. For all future messages (type=NONE), both devices would compute a hash (e.g., HMAC-SHA256)
+    //    of the message payload using the shared secret, and put the result in the `payload_hash`
+    //    field. The receiver would then verify this hash to protect against spoofing.
+    //
+    // Since we cannot modify the protobuf definition here, this function just saves
+    // the locally-generated (and thus mismatched) secret.
+
     int idx = findFriend(node);
     if (idx < 0) {
         for (int i = 0; i < MAX_FRIENDS; ++i) { if (!friends_[i].used) { idx = i; break; } }
@@ -458,6 +480,55 @@ int FriendFinderModule::handleInputEvent(const InputEvent *ev)
                 currentState = FriendFinderState::FRIEND_LIST_ACTION;
                 screen->forceDisplay();
             }
+            return 1;
+        }
+        return 0;
+    }
+
+    /* ---------- Friend List Action ("Track/Remove/Back") ---------- */
+    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
+        if (btnUp)   { overlayIndex = (overlayIndex + NUM_FRIEND_ACTIONS - 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
+        if (btnDown) { overlayIndex = (overlayIndex + 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
+        if (btnBack) { currentState = FriendFinderState::FRIEND_LIST; screen->forceDisplay(); return 1; }
+        if (btnSel) {
+            const int slot = getFriendSlotByListIndex(friendListIndex);
+            if (slot >= 0) {
+                if (overlayIndex == 0) {           // Track
+                    startTracking(friends_[slot].node);
+                } else if (overlayIndex == 1) {    // Remove
+                    removeFriendAt(friendListIndex);
+                    int cnt = getUsedFriendsCount();
+                    if (cnt == 0) {
+                        currentState = FriendFinderState::MENU_SELECTION;
+                        screen->showSimpleBanner("Last friend removed", 1200);
+                        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+                    } else {
+                        friendListIndex = std::min(friendListIndex, cnt - 1);
+                        currentState = FriendFinderState::FRIEND_LIST;
+                        screen->forceDisplay();
+                    }
+                } else if (overlayIndex == 2) {    // Back
+                    currentState = FriendFinderState::FRIEND_LIST;
+                    screen->forceDisplay();
+                }
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    /* ---------- Friend List Browse ---------- */
+    if (currentState == FriendFinderState::FRIEND_LIST) {
+        int cnt = getUsedFriendsCount();
+        if (cnt == 0) { currentState = FriendFinderState::MENU_SELECTION; return 1; }
+
+        if (btnUp)   { friendListIndex = (friendListIndex + cnt - 1) % cnt; screen->forceDisplay(); return 1; }
+        if (btnDown) { friendListIndex = (friendListIndex + 1) % cnt; screen->forceDisplay(); return 1; }
+        if (btnBack) { currentState = FriendFinderState::MENU_SELECTION; raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false); return 1; }
+        if (btnSel)  {
+            overlayIndex = 0;
+            currentState = FriendFinderState::FRIEND_LIST_ACTION;
+            screen->forceDisplay();
             return 1;
         }
         return 0;
@@ -1058,7 +1129,6 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
 
     truncName(peerName, nameBuf, sizeof(nameBuf), 12);
 
-    // Distance and Bearing
     bool havePeerPos = (peerData.latitude_i != 0 || peerData.longitude_i != 0);
     bool haveBoth = haveFix && havePeerPos;
     float bearingDeg = 0;
@@ -1195,6 +1265,17 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
         this->drawMenuList(display, x, y, W, H, rows, NUM_MENU, menuIndex, "Friend Finder");
         return;
     }
+
+    if (currentState == FriendFinderState::FRIEND_LIST) {
+        drawFriendList(display, x, y, W, H, friendListIndex);
+        return;
+    }
+
+    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
+        static const char *rows[NUM_FRIEND_ACTIONS] = { "Track", "Remove", "Back" };
+        drawMenuList(display, x, y, W, H, rows, NUM_FRIEND_ACTIONS, overlayIndex);
+        return;
+    }   
     
     if (currentState == FriendFinderState::CALIBRATION_MENU) {
         static const char* rows[NUM_CAL_MENU] = {

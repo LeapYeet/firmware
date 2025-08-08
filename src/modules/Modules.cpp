@@ -104,15 +104,8 @@
 #endif
 
 #include "FriendFinderModule.h"
-<<<<<<< HEAD
-<<<<<<< HEAD
 #include "MagnetometerModule.h"
-=======
 
->>>>>>> 539dddfcd (stab)
-=======
-#include "MagnetometerModule.h"
->>>>>>> ff345bb66 (stableish)
 /**
  * Create module instances here.  If you are adding a new module, you must 'new' it here (or somewhere else)
  */
@@ -165,12 +158,7 @@ void setupModules()
 
 magnetometerModule = new MagnetometerModule();
 friendFinderModule = new FriendFinderModule();        
-<<<<<<< HEAD
-=======
-magnetometerModule = new MagnetometerModule();
->>>>>>> ff345bb66 (stableish)
 
- 
         // to a global variable.
 
 #if !MESHTASTIC_EXCLUDE_REMOTEHARDWARE
