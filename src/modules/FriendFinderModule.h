@@ -17,7 +17,9 @@ enum class FriendFinderState : uint8_t {
     AWAITING_CONFIRMATION,
     TRACKING_TARGET,
     BEING_TRACKED,
-    TRACKING_MENU
+    TRACKING_MENU,
+    FRIEND_LIST,
+    FRIEND_LIST_ACTION
 };
 
 class FriendFinderModule
@@ -64,6 +66,10 @@ private:
     void saveFriends();
     int  findFriend(uint32_t node) const;
     void upsertFriend(uint32_t node, uint32_t session_id, const uint8_t secret[16]);
+    int getUsedFriendsCount() const;
+    int getFriendSlotByListIndex(int listIdx) const;
+    void removeFriendAt(int listIdx);
+
 
 private:
     FriendFinderState currentState = FriendFinderState::IDLE;
@@ -79,14 +85,27 @@ private:
     uint32_t          pairingWindowExpiresAt = 0;
     static constexpr uint32_t PAIRING_WINDOW_MS = 30000;
 
-    // Main menu
-    static constexpr int NUM_MENU = 4; // Back/Exit, Start Pairing, Track Friend, List Friends
+    // Main menu (9 items, must match draw & handler):
+    // 0 Back/Exit
+    // 1 Start Pairing
+    // 2 Track Friend
+    // 3 List Friends
+    // 4 Calibrate Compass (FIG-8)
+    // 5 Flat-Spin Cal (table)
+    // 6 Set North Here
+    // 7 Clear North Offset
+    // 8 Dump Compass Cal
+    static constexpr int NUM_MENU = 9;
     int  menuIndex = 0;
 
     // Overlay (while tracking)
     static constexpr int NUM_OVERLAY = 2; // Stop Tracking, Back
     int  overlayIndex = 0;
     
+    // Friend list menu
+    static constexpr int NUM_FRIEND_ACTIONS = 3; // Track, Remove, Back
+    int friendListIndex = 0;
+
     // GPS high-power mode management
     bool isGpsHighPower = false;
     uint32_t originalGpsUpdateInterval = 0;
@@ -113,9 +132,10 @@ private:
     const char *getNodeName(uint32_t nodeNum);
     
 #if HAS_SCREEN
-    // Drawing helpers are now member functions to access state
+    // Drawing helpers are member functions to access state
     void drawMenuList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
                       const char* const* rows, int N, int sel);
+    void drawFriendList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H, int sel);
     void drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
                          const char* peerName,
                          const meshtastic_FriendFinder& peerData,
@@ -125,6 +145,10 @@ private:
 #endif
 
     static FriendFinderModule *instance;
+
+    // Calibration UI state (simple)
+    bool calWasActive = false;     // Figure-8
+    bool flatCalWasActive = false; // Flat-spin
 };
 
 extern FriendFinderModule *friendFinderModule;

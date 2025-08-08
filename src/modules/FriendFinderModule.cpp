@@ -21,7 +21,7 @@
 #include "pb_decode.h"
 
 #define FRIEND_FINDER_PORTNUM meshtastic_PortNum_FRIEND_FINDER_APP
-#define UPDATE_INTERVAL       30    // seconds
+#define UPDATE_INTERVAL       15    // seconds
 #define HIGH_GPS_INTERVAL     2     // seconds
 #define DEFAULT_GPS_INTERVAL  300   // 5 minutes
 
@@ -93,6 +93,36 @@ void FriendFinderModule::setup() {
 }
 
 /* ---------- Friend store (persist up to MAX_FRIENDS) ---------- */
+
+int FriendFinderModule::getUsedFriendsCount() const {
+    int cnt = 0;
+    for (const auto &f : friends_) if (f.used) ++cnt;
+    return cnt;
+}
+
+int FriendFinderModule::getFriendSlotByListIndex(int listIdx) const {
+    int i = 0;
+    for (int slot = 0; slot < MAX_FRIENDS; ++slot) {
+        if (friends_[slot].used) {
+            if (i == listIdx) return slot;
+            ++i;
+        }
+    }
+    return -1; // should not happen if listIdx < count
+}
+
+void FriendFinderModule::removeFriendAt(int listIdx) {
+    int slot = getFriendSlotByListIndex(listIdx);
+    if (slot < 0) return;
+
+    // Securely wipe the friend record from memory before saving.
+    memset(&friends_[slot], 0, sizeof(FriendRecord));
+    friends_[slot].used = false; // Be explicit, though memset does this.
+    
+    saveFriends();
+    LOG_INFO("[FriendFinder] Removed friend at slot %d", slot);
+}
+
 void FriendFinderModule::loadFriends() {
     for (auto &f : friends_) f = FriendRecord{0,0,{0},false};
 
@@ -127,6 +157,28 @@ int FriendFinderModule::findFriend(uint32_t node) const {
 }
 
 void FriendFinderModule::upsertFriend(uint32_t node, uint32_t session_id, const uint8_t secret[16]) {
+    // SECURITY NOTE:
+    // The current implementation has a significant flaw. Each device generates its own
+    // secret locally and never exchanges it with the peer. This means the `secret`
+    // field is currently unused for authentication.
+    //
+    // A robust implementation would require modifying the FriendFinder protobuf definition
+    // to add two fields:
+    //  1. `bytes shared_secret = X;` // For the pairing handshake
+    //  2. `bytes payload_hash = Y;`  // For authenticating every subsequent message
+    //
+    // The proper flow would be:
+    // 1. Initiator sends REQUEST.
+    // 2. Acceptor generates a new random secret, saves it, and sends it back inside
+    //    the ACCEPT message using the new `shared_secret` protobuf field.
+    // 3. Initiator receives ACCEPT, extracts the secret, and saves it.
+    // 4. For all future messages (type=NONE), both devices would compute a hash (e.g., HMAC-SHA256)
+    //    of the message payload using the shared secret, and put the result in the `payload_hash`
+    //    field. The receiver would then verify this hash to protect against spoofing.
+    //
+    // Since we cannot modify the protobuf definition here, this function just saves
+    // the locally-generated (and thus mismatched) secret.
+
     int idx = findFriend(node);
     if (idx < 0) {
         for (int i = 0; i < MAX_FRIENDS; ++i) { if (!friends_[i].used) { idx = i; break; } }
@@ -240,6 +292,55 @@ int FriendFinderModule::handleInputEvent(const InputEvent *ev)
     const bool btnSel   = ev->inputEvent == INPUT_BROKER_SELECT || ev->inputEvent == INPUT_BROKER_ALT_LONG;
     const bool btnBack  = ev->inputEvent == INPUT_BROKER_BACK || ev->inputEvent == INPUT_BROKER_CANCEL;
 
+    /* ---------- Friend List Action ("Track/Remove/Back") ---------- */
+    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
+        if (btnUp)   { overlayIndex = (overlayIndex + NUM_FRIEND_ACTIONS - 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
+        if (btnDown) { overlayIndex = (overlayIndex + 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
+        if (btnBack) { currentState = FriendFinderState::FRIEND_LIST; screen->forceDisplay(); return 1; }
+        if (btnSel) {
+            const int slot = getFriendSlotByListIndex(friendListIndex);
+            if (slot >= 0) {
+                if (overlayIndex == 0) {           // Track
+                    startTracking(friends_[slot].node);
+                } else if (overlayIndex == 1) {    // Remove
+                    removeFriendAt(friendListIndex);
+                    int cnt = getUsedFriendsCount();
+                    if (cnt == 0) {
+                        currentState = FriendFinderState::MENU_SELECTION;
+                        screen->showSimpleBanner("Last friend removed", 1200);
+                        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+                    } else {
+                        friendListIndex = std::min(friendListIndex, cnt - 1);
+                        currentState = FriendFinderState::FRIEND_LIST;
+                        screen->forceDisplay();
+                    }
+                } else if (overlayIndex == 2) {    // Back
+                    currentState = FriendFinderState::FRIEND_LIST;
+                    screen->forceDisplay();
+                }
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    /* ---------- Friend List Browse ---------- */
+    if (currentState == FriendFinderState::FRIEND_LIST) {
+        int cnt = getUsedFriendsCount();
+        if (cnt == 0) { currentState = FriendFinderState::MENU_SELECTION; return 1; }
+
+        if (btnUp)   { friendListIndex = (friendListIndex + cnt - 1) % cnt; screen->forceDisplay(); return 1; }
+        if (btnDown) { friendListIndex = (friendListIndex + 1) % cnt; screen->forceDisplay(); return 1; }
+        if (btnBack) { currentState = FriendFinderState::MENU_SELECTION; raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false); return 1; }
+        if (btnSel)  {
+            overlayIndex = 0;
+            currentState = FriendFinderState::FRIEND_LIST_ACTION;
+            screen->forceDisplay();
+            return 1;
+        }
+        return 0;
+    }
+
     // In-session menu
     if (currentState == FriendFinderState::TRACKING_MENU) {
         if (btnUp)   { overlayIndex = (overlayIndex + NUM_OVERLAY - 1) % NUM_OVERLAY; screen->forceDisplay(); return 1; }
@@ -317,14 +418,83 @@ int FriendFinderModule::handleInputEvent(const InputEvent *ev)
 #endif
                 return 1;
             }
-            case 3: // List Friends (quick count)
+            case 3: // List Friends
             {
 #if HAS_SCREEN
-                char buf[96]; int count = 0;
-                for (int i = 0; i < MAX_FRIENDS; ++i) if (friends_[i].used) ++count;
-                snprintf(buf, sizeof(buf), "Friends saved: %d", count);
-                screen->showSimpleBanner(buf, 1200);
+                if (getUsedFriendsCount() > 0) {
+                    friendListIndex = 0;
+                    currentState = FriendFinderState::FRIEND_LIST;
+                    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
+                } else {
+                    screen->showSimpleBanner("No friends saved", 1200);
+                }
 #endif
+                return 1;
+            }
+            case 4: // Calibrate Compass (figure-8)
+            {
+                if (magnetometerModule) {
+                    magnetometerModule->startFigure8Calibration(15000);
+#if HAS_SCREEN
+                    screen->showSimpleBanner("Compass Cal: move in a FIGURE-8 for 15s", 1800);
+#endif
+                    LOG_INFO("[FriendFinder] Requested FIGURE-8 calibration (15s).");
+                } else {
+                    LOG_WARN("[FriendFinder] magnetometerModule is null");
+#if HAS_SCREEN
+                    screen->showSimpleBanner("No magnetometer module", 1200);
+#endif
+                }
+                return 1;
+            }
+            case 5: // Flat-Spin Cal (table)
+            {
+                if (magnetometerModule) {
+                    magnetometerModule->startFlatSpinCalibration(12000);
+#if HAS_SCREEN
+                    screen->showSimpleBanner("Flat Cal: spin on table 12s", 1600);
+#endif
+                    LOG_INFO("[FriendFinder] Requested FLAT-SPIN calibration (12s).");
+                } else {
+                    LOG_WARN("[FriendFinder] magnetometerModule is null");
+#if HAS_SCREEN
+                    screen->showSimpleBanner("No magnetometer module", 1200);
+#endif
+                }
+                return 1;
+            }
+            case 6: // Set North Here (user zero)
+            {
+                if (magnetometerModule && magnetometerModule->hasHeading()) {
+                    magnetometerModule->setNorthHere();
+#if HAS_SCREEN
+                    screen->showSimpleBanner("North set to current heading", 1200);
+#endif
+                } else {
+#if HAS_SCREEN
+                    screen->showSimpleBanner("Heading not ready", 800);
+#endif
+                }
+                return 1;
+            }
+            case 7: // Clear North Offset
+            {
+                if (magnetometerModule) {
+                    magnetometerModule->clearNorthOffset();
+#if HAS_SCREEN
+                    screen->showSimpleBanner("North offset cleared", 1000);
+#endif
+                }
+                return 1;
+            }
+            case 8: // Dump Compass Cal to log
+            {
+                if (magnetometerModule) {
+                    magnetometerModule->dumpCalToLog();
+#if HAS_SCREEN
+                    screen->showSimpleBanner("Cal dumped to log", 1000);
+#endif
+                }
                 return 1;
             }
             default: return 1;
@@ -350,6 +520,31 @@ int32_t FriendFinderModule::runOnce()
 #endif
         }
     }
+
+    // Show small progress to user during calibration (non-blocking)
+#if HAS_SCREEN
+    if (magnetometerModule) {
+        const bool calNow = magnetometerModule->isCalibrating();
+        if (calNow && !calWasActive) {
+            calWasActive = true;
+            screen->showSimpleBanner("Calibrating… move in FIGURE-8", 1200);
+        }
+        if (!calNow && calWasActive) {
+            calWasActive = false;
+            screen->showSimpleBanner("Compass calibration done", 1200);
+        }
+
+        const bool flatNow = magnetometerModule->isFlatCalibrating();
+        if (flatNow && !flatCalWasActive) {
+            flatCalWasActive = true;
+            screen->showSimpleBanner("Calibrating… spin flat on table", 1200);
+        }
+        if (!flatNow && flatCalWasActive) {
+            flatCalWasActive = false;
+            screen->showSimpleBanner("Flat-spin calibration done", 1200);
+        }
+    }
+#endif
 
     switch (currentState) {
     case FriendFinderState::BEING_TRACKED:
@@ -553,9 +748,17 @@ const char *FriendFinderModule::getNodeName(uint32_t nodeNum)
 {
     if (nodeNum == NODENUM_BROADCAST) return "Broadcast";
     meshtastic_NodeInfoLite *info = nodeDB->getMeshNode(nodeNum);
-    if (info && info->has_user && strlen(info->user.long_name) > 0) return info->user.long_name;
-    static char fallback[12];
-    snprintf(fallback, sizeof(fallback), "!%s", info->user.short_name);
+    static char fallback[16];
+
+    if (info && info->has_user) {
+        if (strlen(info->user.long_name) > 0) return info->user.long_name;
+        if (strlen(info->user.short_name) > 0) {
+            snprintf(fallback, sizeof(fallback), "!%s", info->user.short_name);
+            return fallback;
+        }
+    }
+
+    snprintf(fallback, sizeof(fallback), "0x%08X", (unsigned)nodeNum);
     return fallback;
 }
 
@@ -572,8 +775,6 @@ void FriendFinderModule::raiseUIEvent(UIFrameEvent::Action a, bool focus)
 #if HAS_SCREEN
 
 // --- helpers (drawing only) ---
-
-// This is now a member function
 void FriendFinderModule::drawMenuList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
                          const char* const* rows, int N, int sel)
 {
@@ -592,13 +793,45 @@ void FriendFinderModule::drawMenuList(OLEDDisplay *d, int16_t x, int16_t y, int 
     for (int r = 0; r < maxR && (first + r) < N; ++r) {
         const int yy = top + r * rowH;
         const bool isSel = (first + r == sel);
-        // pointer + label (avoid full-screen fill to reduce OLED bandwidth)
         if (isSel) d->drawString(x + 0, yy, ">");
         d->drawString(x + 10, yy, rows[first + r]);
     }
 }
 
-// C-style helper for truncating names
+void FriendFinderModule::drawFriendList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H, int sel)
+{
+    d->setFont(FONT_SMALL);
+    const int titleH = FONT_HEIGHT_SMALL;
+    const int rowH   = FONT_HEIGHT_SMALL + 2;
+    const int top    = y + titleH + 2;
+
+    // Title
+    d->drawString(x + 2, y, "Friends");
+
+    const int count = getUsedFriendsCount();
+    if (count == 0) {
+        d->drawString(x + 2, top, "No friends saved.");
+        return;
+    }
+
+    // How many rows fit?
+    const int maxR  = std::max(1, (H - (top - y)) / rowH);
+    const int first = std::max(0, std::min(sel - maxR / 2, count - maxR));
+
+    for (int r = 0; r < maxR && (first + r) < count; ++r) {
+        const int listIdx = first + r;
+        const int slot = getFriendSlotByListIndex(listIdx);
+        if (slot < 0) continue; // Should not happen
+
+        const int yy = top + r * rowH;
+        const bool isSel = (listIdx == sel);
+        if (isSel) d->drawString(x + 0, yy, ">");
+        
+        const char *name = getNodeName(friends_[slot].node);
+        d->drawString(x + 10, yy, name);
+    }
+}
+
 static inline const char* truncName(const char* s, char* out, size_t outsz, int maxChars)
 {
     if (!s) s = "Friend";
@@ -613,7 +846,7 @@ static inline const char* truncName(const char* s, char* out, size_t outsz, int 
 }
 
 
-// This is now a member function to access `this->previousDistance`
+
 void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
                             const char* peerName,
                             const meshtastic_FriendFinder& peerData,
@@ -625,11 +858,8 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
     char nameBuf[24];
     char distBuf[16], bearingBuf[16], agoBuf[16], batBuf[16], satsBuf[16];
 
-    // --- Prepare all text strings first ---
-    // Peer Name
     truncName(peerName, nameBuf, sizeof(nameBuf), 12);
 
-    // Distance and Bearing
     bool havePeerPos = (peerData.latitude_i != 0 || peerData.longitude_i != 0);
     bool haveBoth = haveFix && havePeerPos;
     float bearingDeg = 0;
@@ -639,14 +869,13 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
         float currentDistance = me.distanceTo(fr);
         bearingDeg = me.bearingTo(fr) * 180 / PI; if (bearingDeg < 0) bearingDeg += 360;
         
-        // Prepare trend indicator
-        char trendIndicator[3] = " "; // Space, up/down arrow, null terminator
+        char trendIndicator[3] = " ";
         if(previousDistance >= 0.0f) {
-            if(currentDistance < previousDistance - 0.5f) trendIndicator[0] = 25; // Down arrow
-            else if (currentDistance > previousDistance + 0.5f) trendIndicator[0] = 24; // Up arrow
+            if(currentDistance < previousDistance - 1.0f) trendIndicator[0] = 25; // Down arrow
+            else if (currentDistance > previousDistance + 1.0f) trendIndicator[0] = 24; // Up arrow
         }
-        previousDistance = currentDistance; // Update for next frame
-        
+        previousDistance = currentDistance;
+
         if (config.display.units == meshtastic_Config_DisplayConfig_DisplayUnits_IMPERIAL) {
             float feet = currentDistance * METERS_TO_FEET;
             if (feet < 1000) snprintf(distBuf, sizeof(distBuf), "%.0fft%s", feet, trendIndicator);
@@ -655,74 +884,100 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
             if (currentDistance < 1000) snprintf(distBuf, sizeof(distBuf), "%.0fm%s", currentDistance, trendIndicator);
             else snprintf(distBuf, sizeof(distBuf), "%.1fkm%s", currentDistance / 1000, trendIndicator);
         }
-        snprintf(bearingBuf, sizeof(bearingBuf), "%.0fdeg", bearingDeg);
+        snprintf(bearingBuf, sizeof(bearingBuf), "%.0f\xB0", bearingDeg); // Degree symbol
     } else {
-        strlcpy(distBuf, "Dist --", sizeof(distBuf));
-        strlcpy(bearingBuf, "Brg --", sizeof(bearingBuf));
-        previousDistance = -1.0f; // Invalidate distance if we lose fix
+        strlcpy(distBuf, "--      ", sizeof(distBuf));
+        strlcpy(bearingBuf, "--\xB0", sizeof(bearingBuf));
+        previousDistance = -1.0f;
     }
 
-    // Peer Stats
     snprintf(batBuf, sizeof(batBuf), "%u%% Bat", (unsigned)peerData.battery_level);
     snprintf(satsBuf, sizeof(satsBuf), "%u Sats", (unsigned)peerData.sats_in_view);
 
-    // Last Update Time
     if (lastFriendPacketTime == 0) {
-        strlcpy(agoBuf, "waiting...", sizeof(agoBuf));
+        strlcpy(agoBuf, "Waiting...", sizeof(agoBuf));
     } else if (ageSec > 999) {
         strlcpy(agoBuf, ">999s ago", sizeof(agoBuf));
     } else {
         snprintf(agoBuf, sizeof(agoBuf), "%lus ago", ageSec);
     }
     
-    // --- Drawing ---
-    // Layout Constants
-    const int headerH = FONT_HEIGHT_SMALL + 4;
-    const int footerH = (FONT_HEIGHT_SMALL * 2) + 6;
-    const int contentH = H - headerH - footerH;
+    // --- New Layout ---
 
-    // Header
+    // 1. Header (minimal padding)
+    const int headerH = FONT_HEIGHT_SMALL;
     char titleBuf[48];
     snprintf(titleBuf, sizeof(titleBuf), "Tracking: %s", nameBuf);
     d->setTextAlignment(TEXT_ALIGN_CENTER);
     d->drawString(x + W / 2, y, titleBuf);
-    d->drawLine(x + 4, y + FONT_HEIGHT_SMALL + 2, x + W - 4, y + FONT_HEIGHT_SMALL + 2);
+    // d->drawLine(x + 4, y + headerH, x + W - 4, y + headerH);
 
-    // Arrow (or placeholder) in the main content area
-    const int r = std::min(W / 2 - 4, contentH / 2 - 4);
+    // 2. Content Area (Arrow)
+    const int footerH = FONT_HEIGHT_SMALL * 2; // Footer is just the two lines of text
+    const int contentH = H - headerH - footerH; // Maximized content area
+    
+    // Shift center point down slightly for a lower-slung arrow
+    const int cy = y + headerH + (contentH / 2) + 3;
     const int cx = x + W / 2;
-    const int cy = y + headerH + contentH / 2;
+
     if (haveBoth) {
-        const float headingRad = magnetometerModule->hasHeading() ? magnetometerModule->getHeading() * M_PI / 180.0f : 0.0f;
+        const float headingRad = magnetometerModule && magnetometerModule->hasHeading()
+                                ? magnetometerModule->getHeading() * M_PI / 180.0f
+                                : 0.0f;
 
         float arrowTheta = (bearingDeg * PI / 180.0f);
-        if (config.display.compass_north_top == false) arrowTheta -= headingRad;
-        graphics::CompassRenderer::drawNodeHeading(d, cx, cy, r * 1.2f, arrowTheta); // Made arrow slightly larger
+        if (config.display.compass_north_top == false) arrowTheta += headingRad;
+
+        // Set arrow to fill 100% of the new, larger content area
+        const float arrowSize = (float)contentH;
+        // Make the arrow very narrow/long to improve directionality
+        const float arrowWidth = arrowSize * 0.4f; 
+
+        // Define points for a simple triangle arrow pointing UP (0 rad) relative to origin (0,0)
+        float p1x = 0;                    float p1y = -arrowSize / 2.0f; // Tip
+        float p2x = -arrowWidth / 2.0f;   float p2y = arrowSize / 2.0f;  // Base-left
+        float p3x = arrowWidth / 2.0f;    float p3y = arrowSize / 2.0f;  // Base-right
+
+        // Rotate points
+        float cos_a = cosf(arrowTheta);
+        float sin_a = sinf(arrowTheta);
+
+        int16_t r_p1x = p1x * cos_a - p1y * sin_a; int16_t r_p1y = p1x * sin_a + p1y * cos_a;
+        int16_t r_p2x = p2x * cos_a - p2y * sin_a; int16_t r_p2y = p2x * sin_a + p2y * cos_a;
+        int16_t r_p3x = p3x * cos_a - p3y * sin_a; int16_t r_p3y = p3x * sin_a + p3y * cos_a;
+        
+        // Translate to screen center and draw
+        d->fillTriangle(cx + r_p1x, cy + r_p1y, 
+                        cx + r_p2x, cy + r_p2y, 
+                        cx + r_p3x, cy + r_p3y);
+
     } else {
         d->setTextAlignment(TEXT_ALIGN_CENTER);
         d->setFont(FONT_LARGE);
         d->drawString(cx, cy - (FONT_HEIGHT_LARGE / 2), "?");
-        d->setFont(FONT_SMALL);
     }
 
-    // Footer with two rows of data
-    const int footerY1 = y + H - (FONT_HEIGHT_SMALL * 2) - 2;
+    // 3. Footer Area (Stats)
+    const int footerY1 = y + H - (FONT_HEIGHT_SMALL * 2);
     const int footerY2 = y + H - FONT_HEIGHT_SMALL;
 
-    // Footer Line 1
+    d->setFont(FONT_SMALL);
+
+    // Row 1: Distance | Data Age
     d->setTextAlignment(TEXT_ALIGN_LEFT);
-    d->drawString(x + 4, footerY1, distBuf);
-    d->setTextAlignment(TEXT_ALIGN_CENTER);
-    d->drawString(x + W/2, footerY1, agoBuf);
+    d->drawString(x + 2, footerY1, distBuf);
     d->setTextAlignment(TEXT_ALIGN_RIGHT);
-    d->drawString(x + W - 4, footerY1, batBuf);
+    d->drawString(x + W - 2, footerY1, agoBuf);
     
-    // Footer Line 2
+    // Row 2: Bearing | Peer Battery | Peer Sats
     d->setTextAlignment(TEXT_ALIGN_LEFT);
-    d->drawString(x + 4, footerY2, bearingBuf);
+    d->drawString(x + 2, footerY2, bearingBuf);
+    d->setTextAlignment(TEXT_ALIGN_CENTER);
+    d->drawString(x + W/2, footerY2, batBuf);
     d->setTextAlignment(TEXT_ALIGN_RIGHT);
-    d->drawString(x + W - 4, footerY2, satsBuf);
+    d->drawString(x + W - 2, footerY2, satsBuf);
 }
+
 
 void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {
@@ -731,12 +986,33 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
 
     // Fast in-frame menu
     if (currentState == FriendFinderState::MENU_SELECTION) {
-        static const char* rows[NUM_MENU] = {"Back/Exit", "Start Pairing", "Track Friend", "List Friends"};
+        static const char* rows[NUM_MENU] = {
+            "Back/Exit",
+            "Start Pairing",
+            "Track Friend",
+            "List Friends",
+            "Calibrate Compass",
+            "Flat-Spin Cal (table)",
+            "Set North Here",
+            "Clear North Offset",
+            "Dump Compass Cal"
+        };
         this->drawMenuList(display, x, y, W, H, rows, NUM_MENU, menuIndex);
         return;
     }
+
+    if (currentState == FriendFinderState::FRIEND_LIST) {
+        drawFriendList(display, x, y, W, H, friendListIndex);
+        return;
+    }
+
+    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
+        static const char *rows[NUM_FRIEND_ACTIONS] = { "Track", "Remove", "Back" };
+        drawMenuList(display, x, y, W, H, rows, NUM_FRIEND_ACTIONS, overlayIndex);
+        return;
+    }   
     
-    // New In-session Menu
+    // In-session Menu
     if (currentState == FriendFinderState::TRACKING_MENU) {
         static const char* rows[NUM_OVERLAY] = {"Stop Tracking", "Back"};
         this->drawMenuList(display, x, y, W, H, rows, NUM_OVERLAY, overlayIndex);
@@ -784,5 +1060,7 @@ bool FriendFinderModule::shouldDraw()
            currentState == FriendFinderState::BEING_TRACKED ||
            currentState == FriendFinderState::AWAITING_RESPONSE ||
            currentState == FriendFinderState::MENU_SELECTION ||
-           currentState == FriendFinderState::TRACKING_MENU;
+           currentState == FriendFinderState::TRACKING_MENU   ||
+           currentState == FriendFinderState::FRIEND_LIST      ||
+           currentState == FriendFinderState::FRIEND_LIST_ACTION;
 }

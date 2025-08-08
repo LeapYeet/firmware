@@ -155,8 +155,8 @@ void setupModules()
         new GenericThreadModule();
 #endif
 
-friendFinderModule = new FriendFinderModule();        
 magnetometerModule = new MagnetometerModule();
+friendFinderModule = new FriendFinderModule();        
 
  
         // to a global variable.
