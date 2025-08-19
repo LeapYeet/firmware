@@ -106,6 +106,10 @@ private:
     uint32_t flatDurationMs = 12000;
     bool     flatHasData = false;
 
+    // Rotation detection for flat-spin
+    double   flatSpinCrossSum = 0.0;
+    double   flatSpinPrevX = 0.0, flatSpinPrevY = 0.0;
+
     // Online moments for XY (on already figure-8-calibrated data)
     uint32_t nXY = 0;
     double   sumX = 0.0, sumY = 0.0;
@@ -113,6 +117,7 @@ private:
 
     // 2D soft-iron parameters (apply AFTER figure-8 cal)
     bool  siValid = false;
+    bool  flipYafterCal = false;          // Correct for inverted Y axis if CCW rotation is detected
     float siBx = 0.0f, siBy = 0.0f;          // 2D bias (on post-cal XY)
     float siSxx = 1.0f, siSxy = 0.0f,        // 2x2 whitening matrix
           siSyx = 0.0f, siSyy = 1.0f;

@@ -38,6 +38,12 @@ class menuHandler
         key_verification_final_prompt,
         trace_route_menu,
         throttle_message,
+        friend_finder_base_menu,
+        friend_finder_list_menu,
+        friend_finder_list_action_menu,
+        friend_finder_cal_menu,
+        friend_finder_session_menu,
+        friend_finder_map_menu,
     };
     static screenMenus menuQueue;
 
@@ -73,6 +79,12 @@ class menuHandler
     static void notificationsMenu();
     static void screenOptionsMenu();
     static void powerMenu();
+    static void friendFinderBaseMenu();
+    static void friendFinderListMenu();
+    static void friendFinderListActionMenu();
+    static void friendFinderCalMenu();
+    static void friendFinderSessionMenu();
+    static void friendFinderMapMenu();
 
   private:
     static void saveUIConfig();

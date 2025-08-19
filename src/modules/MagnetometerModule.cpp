@@ -189,6 +189,10 @@ void MagnetometerModule::applySoftIron2D(float &fx, float &fy) {
     float vy = fy - siBy;
     float ox = siSxx * vx + siSxy * vy;
     float oy = siSyx * vx + siSyy * vy;
+    // Apply axis flip if detected during calibration
+    if (flipYafterCal) {
+        oy = -oy;
+    }
     fx = ox; fy = oy;
 }
 
@@ -331,6 +335,15 @@ int32_t MagnetometerModule::runOnce() {
         nXY++;
         double dx = (double)fx;
         double dy = (double)fy;
+
+        // For rotation detection, calculate cross product from previous point.
+        // The sum of z-components of (p_prev x p_curr) gives an indication of direction.
+        if (nXY > 1) {
+            flatSpinCrossSum += flatSpinPrevX * dy - dx * flatSpinPrevY;
+        }
+        flatSpinPrevX = dx;
+        flatSpinPrevY = dy;
+
         sumX += dx;
         sumY += dy;
         sXX  += dx * dx;
@@ -381,6 +394,22 @@ int32_t MagnetometerModule::runOnce() {
                 const double a12 =  cs*invS1*sn + (-sn)*invS2*cs;    // cs*sn*(invS1 - invS2)
                 const double a21 =  sn*invS1*cs +  cs*invS2*(-sn);   // same as a12
                 const double a22 =  sn*invS1*sn +  cs*invS2*cs;      // sn^2 * invS1 + cs^2 * invS2
+
+                // --- NEW: Check rotation direction ---
+                // We asked the user to spin CLOCKWISE.
+                // In a standard right-hand coordinate system (X right, Y up), a CW rotation
+                // produces a negative sum of cross products z = x1*y2 - x2*y1.
+                // A positive sum means CCW rotation, which implies an axis is inverted.
+                if (flatSpinCrossSum > 0) {
+                    flipYafterCal = true;
+                    LOG_INFO("[Magnetometer] Flat-spin detected CCW rotation. Assuming inverted Y-axis. Enabling correction.");
+                } else if (flatSpinCrossSum < 0) {
+                    flipYafterCal = false;
+                    LOG_INFO("[Magnetometer] Flat-spin detected CW rotation as expected. No axis flip correction needed.");
+                } else {
+                    // No significant rotation. Leave flipYafterCal as it was.
+                    LOG_WARN("[Magnetometer] Flat-spin: No significant rotation detected. Axis flip correction state unchanged.");
+                }
 
                 // Store as floats
                 siBx  = (float)mx;
@@ -519,7 +548,11 @@ void MagnetometerModule::startFlatSpinCalibration(uint32_t durationMs) {
     flatStartMs = millis();
     flatDurationMs = durationMs ? durationMs : 12000;
     nXY = 0; sumX = sumY = 0.0; sXX = sXY = sYY = 0.0;
-    LOG_INFO("[Magnetometer] FLAT-SPIN calibration started for %u ms. Spin device flat on a table at constant speed.", (unsigned)flatDurationMs);
+    // Reset rotation detection state
+    flatSpinCrossSum = 0.0;
+    flatSpinPrevX = 0.0;
+    flatSpinPrevY = 0.0;
+    LOG_INFO("[Magnetometer] FLAT-SPIN calibration started for %u ms. Spin device CLOCKWISE and flat on a table.", (unsigned)flatDurationMs);
 }
 
 uint8_t MagnetometerModule::getFlatCalPercent() const {
@@ -548,10 +581,11 @@ void MagnetometerModule::clearNorthOffset() {
 
 void MagnetometerModule::clearSoftIron2D() {
     siValid = false;
+    flipYafterCal = false;
     siBx = siBy = 0.0f;
     siSxx = siSyy = 1.0f; siSxy = siSyx = 0.0f;
     saveSoftIronPrefs();
-    LOG_INFO("[Magnetometer] Cleared 2D soft-iron matrix.");
+    LOG_INFO("[Magnetometer] Cleared 2D soft-iron matrix and axis flip state.");
 }
 
 /* ---------- Prefs ---------- */
@@ -571,6 +605,7 @@ void MagnetometerModule::loadPrefs() {
 
     // 2D soft-iron
     siValid = prefs.getBool("si_ok", false);
+    flipYafterCal = prefs.getBool("flip_y", false);
     siBx    = prefs.getFloat("si_bx", 0.0f);
     siBy    = prefs.getFloat("si_by", 0.0f);
     siSxx   = prefs.getFloat("si_sxx", 1.0f);
@@ -583,8 +618,8 @@ void MagnetometerModule::loadPrefs() {
     LOG_INFO("[Magnetometer] Loaded cal Bias(%.2f, %.2f, %.2f) Scale(%.3f, %.3f, %.3f) North=%.2f",
              biasX, biasY, biasZ, scaleX, scaleY, scaleZ, userZeroDeg);
     if (siValid) {
-        LOG_INFO("[Magnetometer] Loaded 2D soft-iron: bx=%.2f by=%.2f S=[[%.5f %.5f][%.5f %.5f]]",
-                 siBx, siBy, siSxx, siSxy, siSyx, siSyy);
+        LOG_INFO("[Magnetometer] Loaded 2D soft-iron: bx=%.2f by=%.2f S=[[%.5f %.5f][%.5f %.5f]] flipY=%d",
+                 siBx, siBy, siSxx, siSxy, siSyx, siSyy, (int)flipYafterCal);
     }
 #endif
 }
@@ -614,6 +649,7 @@ void MagnetometerModule::saveSoftIronPrefs() {
 #if MAGMOD_HAVE_NVS
     if (!prefs.begin("magmod", /*rw=*/false)) return;
     prefs.putBool ("si_ok", siValid);
+    prefs.putBool ("flip_y", flipYafterCal);
     prefs.putFloat("si_bx", siBx);
     prefs.putFloat("si_by", siBy);
     prefs.putFloat("si_sxx", siSxx);
@@ -628,6 +664,6 @@ void MagnetometerModule::dumpCalToLog() {
     LOG_INFO("[DUMP] cal_ok=1 off=(%.2f,%.2f,%.2f) sc=(%.2f,%.2f,%.2f)",
              biasX, biasY, biasZ, scaleX, scaleY, scaleZ);
     LOG_INFO("[DUMP] align_ok=1 align_deg=%.2f", userZeroDeg);
-    LOG_INFO("[DUMP] si_ok=%d bx=%.2f by=%.2f S=[[%.5f %.5f][%.5f %.5f]]",
-             siValid ? 1 : 0, siBx, siBy, siSxx, siSxy, siSyx, siSyy);
+    LOG_INFO("[DUMP] si_ok=%d flip_y=%d bx=%.2f by=%.2f S=[[%.5f %.5f][%.5f %.5f]]",
+             siValid ? 1 : 0, flipYafterCal ? 1 : 0, siBx, siBy, siSxx, siSxy, siSyx, siSyy);
 }
