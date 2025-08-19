@@ -159,28 +159,6 @@ int FriendFinderModule::findFriend(uint32_t node) const {
 }
 
 void FriendFinderModule::upsertFriend(uint32_t node, uint32_t session_id, const uint8_t secret[16]) {
-    // SECURITY NOTE:
-    // The current implementation has a significant flaw. Each device generates its own
-    // secret locally and never exchanges it with the peer. This means the `secret`
-    // field is currently unused for authentication.
-    //
-    // A robust implementation would require modifying the FriendFinder protobuf definition
-    // to add two fields:
-    //  1. `bytes shared_secret = X;` // For the pairing handshake
-    //  2. `bytes payload_hash = Y;`  // For authenticating every subsequent message
-    //
-    // The proper flow would be:
-    // 1. Initiator sends REQUEST.
-    // 2. Acceptor generates a new random secret, saves it, and sends it back inside
-    //    the ACCEPT message using the new `shared_secret` protobuf field.
-    // 3. Initiator receives ACCEPT, extracts the secret, and saves it.
-    // 4. For all future messages (type=NONE), both devices would compute a hash (e.g., HMAC-SHA256)
-    //    of the message payload using the shared secret, and put the result in the `payload_hash`
-    //    field. The receiver would then verify this hash to protect against spoofing.
-    //
-    // Since we cannot modify the protobuf definition here, this function just saves
-    // the locally-generated (and thus mismatched) secret.
-
     int idx = findFriend(node);
     if (idx < 0) {
         for (int i = 0; i < MAX_FRIENDS; ++i) { if (!friends_[i].used) { idx = i; break; } }
@@ -485,50 +463,179 @@ int FriendFinderModule::handleInputEvent(const InputEvent *ev)
         return 0;
     }
 
-    /* ---------- Friend List Action ("Track/Remove/Back") ---------- */
-    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
-        if (btnUp)   { overlayIndex = (overlayIndex + NUM_FRIEND_ACTIONS - 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
-        if (btnDown) { overlayIndex = (overlayIndex + 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
-        if (btnBack) { currentState = FriendFinderState::FRIEND_LIST; screen->forceDisplay(); return 1; }
-        if (btnSel) {
-            const int slot = getFriendSlotByListIndex(friendListIndex);
-            if (slot >= 0) {
-                if (overlayIndex == 0) {           // Track
-                    startTracking(friends_[slot].node);
-                } else if (overlayIndex == 1) {    // Remove
-                    removeFriendAt(friendListIndex);
-                    int cnt = getUsedFriendsCount();
-                    if (cnt == 0) {
+    /* ---------- Friend Map (Single Button Logic) ---------- */
+    if (currentState == FriendFinderState::FRIEND_MAP) {
+        if (friendMapMenuVisible) {
+            // --- Menu is OPEN ---
+            if (isNavDown) { // Short press: navigate menu
+                friendMapMenuIndex = (friendMapMenuIndex + 1) % NUM_MAP_MENU;
+                screen->forceDisplay();
+                return 1;
+            }
+            if (isSelect) { // Long press: select menu item
+                switch(friendMapMenuIndex) {
+                    case 0: // Toggle Names
+                        friendMapNamesVisible = !friendMapNamesVisible;
+                        break;
+                    case 1: // Back to Map
+                        // No action needed, just close menu
+                        break;
+                    case 2: // Exit
                         currentState = FriendFinderState::MENU_SELECTION;
-                        screen->showSimpleBanner("Last friend removed", 1200);
                         raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-                    } else {
-                        friendListIndex = std::min(friendListIndex, cnt - 1);
-                        currentState = FriendFinderState::FRIEND_LIST;
-                        screen->forceDisplay();
-                    }
-                } else if (overlayIndex == 2) {    // Back
-                    currentState = FriendFinderState::FRIEND_LIST;
-                    screen->forceDisplay();
+                        break;
                 }
+                friendMapMenuVisible = false; // Close menu after action
+                screen->forceDisplay();
+                return 1;
+            }
+        } else {
+            // --- Menu is CLOSED ---
+            if (isSelect) { // Long press: open the menu
+                friendMapMenuVisible = true;
+                friendMapMenuIndex = 0;
+                screen->forceDisplay();
+                return 1;
+            }
+        }
+
+        // Double press (back) exits the map screen regardless of menu state
+        if (isBack) {
+            currentState = FriendFinderState::MENU_SELECTION;
+            raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+            return 1;
+        }
+
+        return 0; // Consume all other inputs
+    }
+
+    /* ---------- Calibration Submenu ---------- */
+    if (currentState == FriendFinderState::CALIBRATION_MENU) {
+        if (isNavUp)   { calibrationMenuIndex = (calibrationMenuIndex + NUM_CAL_MENU - 1) % NUM_CAL_MENU; screen->forceDisplay(); return 1; }
+        if (isNavDown) { calibrationMenuIndex = (calibrationMenuIndex + 1) % NUM_CAL_MENU; screen->forceDisplay(); return 1; }
+        if (isBack) { currentState = FriendFinderState::MENU_SELECTION; screen->forceDisplay(); return 1; }
+        if (isSelect) {
+            switch (calibrationMenuIndex) {
+            case 0: // Back
+                currentState = FriendFinderState::MENU_SELECTION;
+                screen->forceDisplay();
+                break;
+            case 1: // Calibrate Compass (figure-8)
+                if (magnetometerModule) {
+                    magnetometerModule->startFigure8Calibration(15000);
+#if HAS_SCREEN
+                    screen->showSimpleBanner("Compass Cal: move in a FIGURE-8 for 15s", 1800);
+#endif
+                    LOG_INFO("[FriendFinder] Requested FIGURE-8 calibration (15s).");
+                } else {
+#if HAS_SCREEN
+                    screen->showSimpleBanner("No magnetometer", 1200);
+#endif
+                }
+                break;
+            case 2: // Flat-Spin Cal (table)
+                if (magnetometerModule) {
+                    magnetometerModule->startFlatSpinCalibration(12000);
+#if HAS_SCREEN
+                    screen->showSimpleBanner("Spin slowly on table CLOCKWISE FOR 12s", 1600);
+#endif
+                    LOG_INFO("[FriendFinder] Requested FLAT-SPIN calibration (12s).");
+                } else {
+#if HAS_SCREEN
+                    screen->showSimpleBanner("No magnetometer", 1200);
+#endif
+                }
+                break;
+            case 3: // Set North Here (user zero)
+                if (magnetometerModule && magnetometerModule->hasHeading()) {
+                    magnetometerModule->setNorthHere();
+#if HAS_SCREEN
+                    screen->showSimpleBanner("North set to current heading", 1200);
+#endif
+                } else {
+#if HAS_SCREEN
+                    screen->showSimpleBanner("Heading not ready", 800);
+#endif
+                }
+                break;
+            case 4: // Clear North Offset
+                if (magnetometerModule) {
+                    magnetometerModule->clearNorthOffset();
+#if HAS_SCREEN
+                    screen->showSimpleBanner("North offset cleared", 1000);
+#endif
+                }
+                break;
+            case 5: // Dump Compass Cal to log
+                if (magnetometerModule) {
+                    magnetometerModule->dumpCalToLog();
+#if HAS_SCREEN
+                    screen->showSimpleBanner("Cal dumped to log", 1000);
+#endif
+                }
+                break;
             }
             return 1;
         }
         return 0;
     }
 
-    /* ---------- Friend List Browse ---------- */
-    if (currentState == FriendFinderState::FRIEND_LIST) {
-        int cnt = getUsedFriendsCount();
-        if (cnt == 0) { currentState = FriendFinderState::MENU_SELECTION; return 1; }
+    /* ---------- friend-list action menu ("Track / Remove / Back") ---------- */
+    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
+        if (isNavUp)   { overlayIndex = (overlayIndex + NUM_FRIEND_ACTIONS - 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
+        if (isNavDown) { overlayIndex = (overlayIndex + 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
+        if (isBack) { currentState = FriendFinderState::FRIEND_LIST; screen->forceDisplay(); return 1; }
+        if (isSelect) {
+            // friendListIndex is the raw index from the friend list (1=first friend)
+            const int slot = getFriendSlotByListIndex(friendListIndex);
+            
+            switch (overlayIndex) {
+            case 0: // Track
+                if (slot >= 0) requestMutualTracking(friends_[slot].node);
+                break;
+            case 1: // Remove
+                if (slot >= 0) {
+                    removeFriendAt(friendListIndex);
+                    int cnt = getUsedFriendsCount();
+                    // Go back to friend list, or menu if list is now empty
+                    if (cnt == 0) {
+                        currentState = FriendFinderState::MENU_SELECTION;
+                        screen->showSimpleBanner("No friends saved", 1200);
+                        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+                    } else {
+                        friendListIndex = std::min(friendListIndex, cnt); // cnt is now count+1 for "Back" item
+                        currentState = FriendFinderState::FRIEND_LIST;
+                        screen->forceDisplay();
+                    }
+                }
+                break;
+            case 2: // Back
+                currentState = FriendFinderState::FRIEND_LIST;
+                screen->forceDisplay();
+                break;
+            }
+            return 1;
+        }
+        return 0;
+    }
 
-        if (btnUp)   { friendListIndex = (friendListIndex + cnt - 1) % cnt; screen->forceDisplay(); return 1; }
-        if (btnDown) { friendListIndex = (friendListIndex + 1) % cnt; screen->forceDisplay(); return 1; }
-        if (btnBack) { currentState = FriendFinderState::MENU_SELECTION; raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false); return 1; }
-        if (btnSel)  {
-            overlayIndex = 0;
-            currentState = FriendFinderState::FRIEND_LIST_ACTION;
-            screen->forceDisplay();
+    /* ---------- friend-list Browse ---------- */
+    if (currentState == FriendFinderState::FRIEND_LIST) {
+        // Total items = number of friends + 1 for "Back"
+        int cnt = getUsedFriendsCount() + 1;
+        
+        if (isNavUp)   { friendListIndex = (friendListIndex + cnt - 1) % cnt; screen->forceDisplay(); return 1; }
+        if (isNavDown) { friendListIndex = (friendListIndex + 1) % cnt; screen->forceDisplay(); return 1; }
+        if (isBack) { currentState = FriendFinderState::MENU_SELECTION; raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false); return 1; }
+        if (isSelect)  {
+            if (friendListIndex == 0) { // "Back" selected
+                currentState = FriendFinderState::MENU_SELECTION;
+                raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+            } else { // A friend was selected
+                overlayIndex = 0; // Default to "Track"
+                currentState = FriendFinderState::FRIEND_LIST_ACTION;
+                screen->forceDisplay();
+            }
             return 1;
         }
         return 0;
@@ -1273,7 +1380,8 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
 
     if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
         static const char *rows[NUM_FRIEND_ACTIONS] = { "Track", "Remove", "Back" };
-        drawMenuList(display, x, y, W, H, rows, NUM_FRIEND_ACTIONS, overlayIndex);
+        const char *friendName = getNodeName(friends_[getFriendSlotByListIndex(friendListIndex)].node);
+        this->drawMenuList(display, x, y, W, H, rows, NUM_FRIEND_ACTIONS, overlayIndex, friendName);
         return;
     }   
     
