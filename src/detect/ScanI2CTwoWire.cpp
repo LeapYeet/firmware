@@ -184,8 +184,13 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 type = RTC_RV3028;
                 logFoundDevice("RV3028", (uint8_t)addr.address);
                 rtc.initI2C(*i2cBus);
-                rtc.writeToRegister(0x35, 0x07); // no Clkout
-                rtc.writeToRegister(0x37, 0xB4);
+                // Update RTC EEPROM settings, if necessary
+                if (rtc.readEEPROMRegister(0x35) != 0x07) {
+                    rtc.writeEEPROMRegister(0x35, 0x07); // no Clkout
+                }
+                if (rtc.readEEPROMRegister(0x37) != 0xB4) {
+                    rtc.writeEEPROMRegister(0x37, 0xB4);
+                }
                 break;
 #endif
 
@@ -478,8 +483,14 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                     type = MLX90614;
                     logFoundDevice("MLX90614", (uint8_t)addr.address);
                 } else {
-                    type = MPR121KB;
-                    logFoundDevice("MPR121KB", (uint8_t)addr.address);
+                    registerValue = getRegisterValue(ScanI2CTwoWire::RegisterLocation(addr, 0x00), 1); // DRV2605_REG_STATUS
+                    if (registerValue == 0xe0) {
+                        type = DRV2605;
+                        logFoundDevice("DRV2605", (uint8_t)addr.address);
+                    } else {
+                        type = MPR121KB;
+                        logFoundDevice("MPR121KB", (uint8_t)addr.address);
+                    }
                 }
                 break;
 
