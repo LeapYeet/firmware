@@ -395,17 +395,18 @@ int32_t MagnetometerModule::runOnce() {
                 const double a21 =  sn*invS1*cs +  cs*invS2*(-sn);   // same as a12
                 const double a22 =  sn*invS1*sn +  cs*invS2*cs;      // sn^2 * invS1 + cs^2 * invS2
 
-                // --- NEW: Check rotation direction ---
+                // --- Check rotation direction ---
                 // We asked the user to spin CLOCKWISE.
-                // In a standard right-hand coordinate system (X right, Y up), a CW rotation
-                // produces a negative sum of cross products z = x1*y2 - x2*y1.
-                // A positive sum means CCW rotation, which implies an axis is inverted.
-                if (flatSpinCrossSum > 0) {
-                    flipYafterCal = true;
-                    LOG_INFO("[Magnetometer] Flat-spin detected CCW rotation. Assuming inverted Y-axis. Enabling correction.");
-                } else if (flatSpinCrossSum < 0) {
+                // A standard right-hand coordinate system (X right, Y up) produces a
+                // negative sum of cross products for a CW rotation.
+                // The logic has been inverted from its original state to match observed hardware
+                // behavior where a CW spin required the Y-axis flip to be enabled for a correct heading.
+                if (flatSpinCrossSum > 0) { // Positive sum: CCW rotation detected.
                     flipYafterCal = false;
-                    LOG_INFO("[Magnetometer] Flat-spin detected CW rotation as expected. No axis flip correction needed.");
+                    LOG_INFO("[Magnetometer] Flat-spin detected CCW rotation. Assuming standard Y-axis. No flip correction needed.");
+                } else if (flatSpinCrossSum < 0) { // Negative sum: CW rotation detected.
+                    flipYafterCal = true;
+                    LOG_INFO("[Magnetometer] Flat-spin detected CW rotation as expected. Enabling inverted Y-axis correction.");
                 } else {
                     // No significant rotation. Leave flipYafterCal as it was.
                     LOG_WARN("[Magnetometer] Flat-spin: No significant rotation detected. Axis flip correction state unchanged.");
@@ -473,24 +474,23 @@ int32_t MagnetometerModule::runOnce() {
         headingDegrees = wrap360(atan2f(emaSin, emaCos) * 180.0f / (float)M_PI);
     }
 
-    const uint32_t now = millis();
-    if (now - lastLogMs > 2000) {
-        LOG_INFO("[Magnetometer] (mag-only) MAG x=%d y=%d z=%d | fx=%.1f fy=%.1f fz=%.1f | heading=%.2f deg (bus=%s @0x%02X)",
-                 rx, ry, rz, fx, fy, fz, headingDegrees,
-                 (magBus == &Wire) ? "Wire" : "Wire1", magAddr);
-        lastLogMs = now;
-    }
+    // const uint32_t now = millis();
+    // if (now - lastLogMs > 2000) {
+    //     LOG_INFO("[Magnetometer] (mag-only) MAG x=%d y=%d z=%d | fx=%.1f fy=%.1f fz=%.1f | heading=%.2f deg (bus=%s @0x%02X)",
+    //              rx, ry, rz, fx, fy, fz, headingDegrees,
+    //              (magBus == &Wire) ? "Wire" : "Wire1", magAddr);
+    //     lastLogMs = now;
+    // }
 
     return 50;
 }
-
 bool MagnetometerModule::hasHeading() {
-    LOG_INFO("[Magnetometer] hasHeading() -> %s", headingIsValid ? "TRUE" : "FALSE");
+    //LOG_INFO("[Magnetometer] hasHeading() -> %s", headingIsValid ? "TRUE" : "FALSE");
     return headingIsValid;
 }
 
 float MagnetometerModule::getHeading() {
-    LOG_INFO("[Magnetometer] getHeading() -> %.2f deg (valid=%s)", headingDegrees, headingIsValid ? "TRUE" : "FALSE");
+    //LOG_INFO("[Magnetometer] getHeading() -> %.2f deg (valid=%s)", headingDegrees, headingIsValid ? "TRUE" : "FALSE");
     return headingDegrees;
 }
 

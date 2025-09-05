@@ -9,6 +9,7 @@
 #include "graphics/draw/CompassRenderer.h"
 #include "graphics/draw/NotificationRenderer.h"
 #include "graphics/TimeFormatters.h"
+#include "graphics/draw/MenuHandler.h"
 #include "main.h"
 #include "input/InputBroker.h"
 #include <cmath>
@@ -21,12 +22,11 @@
 #include "pb_decode.h"
 
 #define FRIEND_FINDER_PORTNUM meshtastic_PortNum_FRIEND_FINDER_APP
-#define UPDATE_INTERVAL       15    // seconds
+#define UPDATE_INTERVAL       20    // seconds
 #define BACKGROUND_UPDATE_INTERVAL 120   // seconds (2 minutes)
 #define HIGH_GPS_INTERVAL     2     // seconds
 #define DEFAULT_GPS_INTERVAL  300   // 5 minutes
 
-/* Optional persistence via ESP32 NVS */
 #if defined(ARDUINO_ARCH_ESP32)
   #include <Preferences.h>
   static Preferences g_prefs;
@@ -35,7 +35,6 @@
   #define FF_HAVE_NVS 0
 #endif
 
-/* Helper for logs */
 static const char* ffTypeName(meshtastic_FriendFinder_RequestType t) {
     switch (t) {
         case meshtastic_FriendFinder_RequestType_NONE:         return "NONE";
@@ -85,7 +84,6 @@ void FriendFinderModule::setup() {
     LOG_INFO("[FriendFinder] build=%s %s", __DATE__, __TIME__);
     LOG_INFO("[FriendFinder] FRIEND_FINDER_PORTNUM=%u", (unsigned)FRIEND_FINDER_PORTNUM);
 
-    // Failsafe: If we boot up and find GPS in high-power mode, assume we crashed and restore it.
     if (config.position.gps_update_interval > 0 && config.position.gps_update_interval <= HIGH_GPS_INTERVAL) {
         LOG_WARN("[FriendFinder] GPS interval is low (%d sec), restoring default. Was device rebooted during a session?", config.position.gps_update_interval);
         config.position.gps_update_interval = DEFAULT_GPS_INTERVAL;
@@ -93,28 +91,35 @@ void FriendFinderModule::setup() {
     }
 }
 
-/* ---------- Friend store (persist up to MAX_FRIENDS) ---------- */
-
 int FriendFinderModule::getUsedFriendsCount() const {
     int cnt = 0;
     for (const auto &f : friends_) if (f.used) ++cnt;
     return cnt;
 }
 
+const FriendFinderModule::FriendRecord& FriendFinderModule::getFriendRecord(int slot) const {
+    return friends_[slot];
+}
+
+const FriendFinderModule::FriendRecord* FriendFinderModule::getFriendByListIndex(int listIdx) const {
+    int slot = getFriendSlotByListIndex(listIdx);
+    if (slot < 0) return nullptr;
+    return &friends_[slot];
+}
+
 int FriendFinderModule::getFriendSlotByListIndex(int listIdx) const {
-    // Note: listIdx==0 is "Back", so friends start at listIdx==1
     if (listIdx <= 0) return -1;
-    int i = 1; 
+    int i = 1;
     for (int slot = 0; slot < MAX_FRIENDS; ++slot) {
         if (friends_[slot].used) {
             if (i == listIdx) return slot;
             ++i;
         }
     }
-    return -1; // should not happen if listIdx < count+1
+    return -1;
 }
 
-void FriendFinderModule::removeFriendAt(int listIdx) {
+void FriendFinderModule::removeFriendByListIndex(int listIdx) {
     int slot = getFriendSlotByListIndex(listIdx);
     if (slot < 0) return;
     friends_[slot].used = false;
@@ -124,12 +129,12 @@ void FriendFinderModule::removeFriendAt(int listIdx) {
 
 void FriendFinderModule::loadFriends() {
     for (auto &f : friends_) {
-        f = {}; // Zero-initialize all members
+        f = {};
         f.last_data = meshtastic_FriendFinder_init_default;
     }
 
 #if FF_HAVE_NVS
-    if (!g_prefs.begin("ffinder", /*ro*/false)) {
+    if (!g_prefs.begin("ffinder", false)) {
         LOG_WARN("[FriendFinder] NVS open failed; friends in RAM only");
         return;
     }
@@ -162,7 +167,7 @@ void FriendFinderModule::upsertFriend(uint32_t node, uint32_t session_id, const 
     int idx = findFriend(node);
     if (idx < 0) {
         for (int i = 0; i < MAX_FRIENDS; ++i) { if (!friends_[i].used) { idx = i; break; } }
-        if (idx < 0) idx = 0; // overwrite first if full
+        if (idx < 0) idx = 0;
     }
     friends_[idx].node = node;
     friends_[idx].session_id = session_id;
@@ -172,7 +177,6 @@ void FriendFinderModule::upsertFriend(uint32_t node, uint32_t session_id, const 
     LOG_INFO("[FriendFinder] Saved friend 0x%08x at slot %d", (unsigned)node, idx);
 }
 
-/* ---------- GPS Mode Control ---------- */
 void FriendFinderModule::activateHighGpsMode() {
     if (!isGpsHighPower && config.position.gps_update_interval != HIGH_GPS_INTERVAL) {
         LOG_INFO("[FriendFinder] Activating high-power GPS mode.");
@@ -192,29 +196,129 @@ void FriendFinderModule::restoreNormalGpsMode() {
     }
 }
 
-/* ---------- UI entry points ---------- */
 void FriendFinderModule::launchMenu()
 {
 #if HAS_SCREEN
-    menuIndex = 0;
-    currentState = FriendFinderState::MENU_SELECTION; // lightweight in-frame list (no overlay)
-    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, /*focus=*/true);
+    graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_base_menu;
+    screen->runNow();
+    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
 #endif
+}
+
+void FriendFinderModule::setState(FriendFinderState s) {
+    currentState = s;
+    if (s == FriendFinderState::IDLE) {
+        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+    } else {
+        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
+    }
 }
 
 void FriendFinderModule::beginPairing()
 {
     pairingWindowOpen = true;
     pairingWindowExpiresAt = millis() + PAIRING_WINDOW_MS;
-    currentState = FriendFinderState::AWAITING_RESPONSE;
+    currentState = FriendFinderState::PAIRING_DISCOVERY;
+    pairingCandidateNodeNum = 0;
+    rejectedPeers.clear();
 
-#if HAS_SCREEN
-    screen->showSimpleBanner("Pairing… Press on BOTH devices", 1500);
-#endif
+    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
 
     sendFriendFinderPacket(NODENUM_BROADCAST, meshtastic_FriendFinder_RequestType_REQUEST, 1);
     lastSentPacketTime = millis();
 }
+
+void FriendFinderModule::showConfirmationPrompt(uint32_t fromNode)
+{
+    if (currentState != FriendFinderState::PAIRING_DISCOVERY) return;
+
+    for (uint32_t rejectedNode : rejectedPeers) {
+        if (fromNode == rejectedNode) {
+            LOG_DEBUG("[FriendFinder] Ignoring request from already rejected peer 0x%08x", (unsigned)fromNode);
+            return;
+        }
+    }
+
+    LOG_INFO("[FriendFinder] Proposing pair with candidate 0x%08x", (unsigned)fromNode);
+    pairingCandidateNodeNum = fromNode;
+    currentState = FriendFinderState::AWAITING_CONFIRMATION;
+
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Pair with %s?", getShortName(fromNode));
+
+    static const char *options[] = {"No", "Yes"};
+    graphics::BannerOverlayOptions bannerOptions;
+    bannerOptions.message = msg;
+    bannerOptions.optionsArrayPtr = options;
+    bannerOptions.optionsCount = 2;
+    bannerOptions.durationMs = 15000;
+    bannerOptions.bannerCallback = [](int selected) {
+        if (!friendFinderModule) return;
+        if (selected == 1) { // Yes
+            friendFinderModule->acceptPairingRequest();
+        } else { // No or timeout
+            friendFinderModule->rejectPairingRequest();
+        }
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void FriendFinderModule::acceptPairingRequest()
+{
+    if (pairingCandidateNodeNum == 0) return;
+
+    LOG_INFO("[FriendFinder] User accepted initial pairing with 0x%08x. Sending ACCEPT and waiting for their ACCEPT.", (unsigned)pairingCandidateNodeNum);
+
+    sendFriendFinderPacket(pairingCandidateNodeNum, meshtastic_FriendFinder_RequestType_ACCEPT);
+    currentState = FriendFinderState::AWAITING_FINAL_ACCEPTANCE;
+    raiseUIEvent(UIFrameEvent::Action::REDRAW_ONLY);
+}
+
+void FriendFinderModule::rejectPairingRequest()
+{
+    LOG_INFO("[FriendFinder] User rejected pairing or request timed out.");
+
+    if (pairingCandidateNodeNum != 0) {
+        sendFriendFinderPacket(pairingCandidateNodeNum, meshtastic_FriendFinder_RequestType_REJECT);
+        rejectedPeers.push_back(pairingCandidateNodeNum);
+    }
+
+    pairingCandidateNodeNum = 0;
+    if (pairingWindowOpen && (int32_t)(millis() - pairingWindowExpiresAt) < 0) {
+        currentState = FriendFinderState::PAIRING_DISCOVERY;
+        raiseUIEvent(UIFrameEvent::Action::REDRAW_ONLY);
+    } else {
+        currentState = FriendFinderState::IDLE;
+        pairingWindowOpen = false;
+        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+        screen->showSimpleBanner("Pairing cancelled", 1200);
+    }
+}
+
+void FriendFinderModule::completePairing(uint32_t nodeNum)
+{
+    if (findFriend(nodeNum) < 0) {
+        uint32_t sess = (uint32_t)random(1, 0x7fffffff);
+        uint8_t  sec[16]; for (int i = 0; i < 16; ++i) sec[i] = random(0, 255);
+        upsertFriend(nodeNum, sess, sec);
+    }
+
+    sendFriendFinderPacket(nodeNum, meshtastic_FriendFinder_RequestType_NONE);
+
+    pairingWindowOpen = false;
+    pairingCandidateNodeNum = 0;
+    currentState = FriendFinderState::IDLE;
+
+    char msg[64];
+    snprintf(msg, sizeof(msg), "%s Paired!", getShortName(nodeNum));
+    screen->showSimpleBanner(msg, 2500);
+
+    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+
+    graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_base_menu;
+    screen->runNow();
+}
+
 
 void FriendFinderModule::requestMutualTracking(uint32_t nodeNum)
 {
@@ -228,7 +332,6 @@ void FriendFinderModule::requestMutualTracking(uint32_t nodeNum)
 #if HAS_SCREEN
     screen->showSimpleBanner("Requesting session...", 1500);
 #endif
-    // Send a directed request to the specific friend
     sendFriendFinderPacket(nodeNum, meshtastic_FriendFinder_RequestType_REQUEST, 0);
     lastSentPacketTime = millis();
 }
@@ -238,21 +341,18 @@ void FriendFinderModule::startTracking(uint32_t nodeNum)
     if (nodeNum == 0 || nodeNum == nodeDB->getNodeNum()) return;
 
     targetNodeNum = nodeNum;
-
     const int friend_idx = findFriend(nodeNum);
 
-    // This function is now only for direct, one-way tracking starts (e.g. from an ACCEPT)
     if (friend_idx >= 0) {
         LOG_INFO("[FriendFinder] startTracking(): already friends with 0x%08x -> start immediately", nodeNum);
         currentState = FriendFinderState::TRACKING_TARGET;
-        previousDistance = -1.0f; // Reset distance trend
+        previousDistance = -1.0f;
 
-        // Pre-load last known data for a faster UI start
         lastFriendData = friends_[friend_idx].last_data;
         lastFriendPacketTime = friends_[friend_idx].last_heard_time;
 
-        activateHighGpsMode(); // Activate real-time GPS
-        lastSentPacketTime = 0; // force quick first beacon
+        activateHighGpsMode();
+        lastSentPacketTime = 0;
 #if HAS_SCREEN
         raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
 #endif
@@ -269,466 +369,62 @@ void FriendFinderModule::endSession(bool notifyPeer)
     targetNodeNum = 0;
     pairingWindowOpen = false;
     currentState = FriendFinderState::IDLE;
-    previousDistance = -1.0f; // Reset distance trend
-    restoreNormalGpsMode(); // Restore original GPS settings
-    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+    previousDistance = -1.0f;
+    restoreNormalGpsMode();
+    screen->setFrames(graphics::Screen::FOCUS_DEFAULT);
 }
 
-/* ---------- Inputs ---------- */
 int FriendFinderModule::handleInputEvent(const InputEvent *ev)
 {
-    if (!ev) return 0;
+    if (!ev || !shouldDraw()) return 0;
 
-    // Standard single-button mapping
-    const bool isNavDown = ev->inputEvent == INPUT_BROKER_DOWN || ev->inputEvent == INPUT_BROKER_USER_PRESS;
+    if (screen->isOverlayBannerShowing()) {
+        return 0;
+    }
+
     const bool isSelect  = ev->inputEvent == INPUT_BROKER_SELECT || ev->inputEvent == INPUT_BROKER_ALT_LONG;
     const bool isBack    = ev->inputEvent == INPUT_BROKER_BACK || ev->inputEvent == INPUT_BROKER_CANCEL;
-    const bool isNavUp   = ev->inputEvent == INPUT_BROKER_UP;
 
-    /* ---------- Friend Map (Single Button Logic) ---------- */
-    if (currentState == FriendFinderState::FRIEND_MAP) {
-        if (friendMapMenuVisible) {
-            // --- Menu is OPEN ---
-            if (isNavDown) { // Short press: navigate menu
-                friendMapMenuIndex = (friendMapMenuIndex + 1) % NUM_MAP_MENU;
-                screen->forceDisplay();
-                return 1;
-            }
-            if (isSelect) { // Long press: select menu item
-                switch(friendMapMenuIndex) {
-                    case 0: // Toggle Names
-                        friendMapNamesVisible = !friendMapNamesVisible;
-                        break;
-                    case 1: // Back to Map
-                        // No action needed, just close menu
-                        break;
-                    case 2: // Exit
-                        currentState = FriendFinderState::MENU_SELECTION;
-                        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-                        break;
-                }
-                friendMapMenuVisible = false; // Close menu after action
-                screen->forceDisplay();
-                return 1;
-            }
-        } else {
-            // --- Menu is CLOSED ---
-            if (isSelect) { // Long press: open the menu
-                friendMapMenuVisible = true;
-                friendMapMenuIndex = 0;
-                screen->forceDisplay();
-                return 1;
-            }
-        }
-
-        // Double press (back) exits the map screen regardless of menu state
+    if (currentState == FriendFinderState::PAIRING_DISCOVERY ||
+        currentState == FriendFinderState::AWAITING_CONFIRMATION ||
+        currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE) {
         if (isBack) {
-            currentState = FriendFinderState::MENU_SELECTION;
+            LOG_INFO("[FriendFinder] User cancelled pairing via back button.");
+            currentState = FriendFinderState::IDLE;
+            pairingWindowOpen = false;
+            pairingCandidateNodeNum = 0;
             raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-            return 1;
-        }
-
-        return 0; // Consume all other inputs
-    }
-
-    /* ---------- Calibration Submenu ---------- */
-    if (currentState == FriendFinderState::CALIBRATION_MENU) {
-        if (isNavUp)   { calibrationMenuIndex = (calibrationMenuIndex + NUM_CAL_MENU - 1) % NUM_CAL_MENU; screen->forceDisplay(); return 1; }
-        if (isNavDown) { calibrationMenuIndex = (calibrationMenuIndex + 1) % NUM_CAL_MENU; screen->forceDisplay(); return 1; }
-        if (isBack) { currentState = FriendFinderState::MENU_SELECTION; screen->forceDisplay(); return 1; }
-        if (isSelect) {
-            switch (calibrationMenuIndex) {
-            case 0: // Back
-                currentState = FriendFinderState::MENU_SELECTION;
-                screen->forceDisplay();
-                break;
-            case 1: // Calibrate Compass (figure-8)
-                if (magnetometerModule) {
-                    magnetometerModule->startFigure8Calibration(15000);
-#if HAS_SCREEN
-                    screen->showSimpleBanner("Compass Cal: move in a FIGURE-8 for 15s", 1800);
-#endif
-                    LOG_INFO("[FriendFinder] Requested FIGURE-8 calibration (15s).");
-                } else {
-#if HAS_SCREEN
-                    screen->showSimpleBanner("No magnetometer", 1200);
-#endif
-                }
-                break;
-            case 2: // Flat-Spin Cal (table)
-                if (magnetometerModule) {
-                    magnetometerModule->startFlatSpinCalibration(12000);
-#if HAS_SCREEN
-                    screen->showSimpleBanner("Spin slowly on table CLOCKWISE FOR 12s", 1600);
-#endif
-                    LOG_INFO("[FriendFinder] Requested FLAT-SPIN calibration (12s).");
-                } else {
-#if HAS_SCREEN
-                    screen->showSimpleBanner("No magnetometer", 1200);
-#endif
-                }
-                break;
-            case 3: // Set North Here (user zero)
-                if (magnetometerModule && magnetometerModule->hasHeading()) {
-                    magnetometerModule->setNorthHere();
-#if HAS_SCREEN
-                    screen->showSimpleBanner("North set to current heading", 1200);
-#endif
-                } else {
-#if HAS_SCREEN
-                    screen->showSimpleBanner("Heading not ready", 800);
-#endif
-                }
-                break;
-            case 4: // Clear North Offset
-                if (magnetometerModule) {
-                    magnetometerModule->clearNorthOffset();
-#if HAS_SCREEN
-                    screen->showSimpleBanner("North offset cleared", 1000);
-#endif
-                }
-                break;
-            case 5: // Dump Compass Cal to log
-                if (magnetometerModule) {
-                    magnetometerModule->dumpCalToLog();
-#if HAS_SCREEN
-                    screen->showSimpleBanner("Cal dumped to log", 1000);
-#endif
-                }
-                break;
-            }
+            screen->showSimpleBanner("Pairing cancelled", 1200);
             return 1;
         }
         return 0;
     }
 
-    /* ---------- friend-list action menu ("Track / Remove / Back") ---------- */
-    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
-        if (isNavUp)   { overlayIndex = (overlayIndex + NUM_FRIEND_ACTIONS - 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
-        if (isNavDown) { overlayIndex = (overlayIndex + 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
-        if (isBack) { currentState = FriendFinderState::FRIEND_LIST; screen->forceDisplay(); return 1; }
-        if (isSelect) {
-            // friendListIndex is the raw index from the friend list (1=first friend)
-            const int slot = getFriendSlotByListIndex(friendListIndex);
-            
-            switch (overlayIndex) {
-            case 0: // Track
-                if (slot >= 0) requestMutualTracking(friends_[slot].node);
-                break;
-            case 1: // Remove
-                if (slot >= 0) {
-                    removeFriendAt(friendListIndex);
-                    int cnt = getUsedFriendsCount();
-                    // Go back to friend list, or menu if list is now empty
-                    if (cnt == 0) {
-                        currentState = FriendFinderState::MENU_SELECTION;
-                        screen->showSimpleBanner("No friends saved", 1200);
-                        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-                    } else {
-                        friendListIndex = std::min(friendListIndex, cnt); // cnt is now count+1 for "Back" item
-                        currentState = FriendFinderState::FRIEND_LIST;
-                        screen->forceDisplay();
-                    }
-                }
-                break;
-            case 2: // Back
-                currentState = FriendFinderState::FRIEND_LIST;
-                screen->forceDisplay();
-                break;
-            }
-            return 1;
-        }
-        return 0;
-    }
-
-    /* ---------- friend-list Browse ---------- */
-    if (currentState == FriendFinderState::FRIEND_LIST) {
-        // Total items = number of friends + 1 for "Back"
-        int cnt = getUsedFriendsCount() + 1;
-        
-        if (isNavUp)   { friendListIndex = (friendListIndex + cnt - 1) % cnt; screen->forceDisplay(); return 1; }
-        if (isNavDown) { friendListIndex = (friendListIndex + 1) % cnt; screen->forceDisplay(); return 1; }
-        if (isBack) { currentState = FriendFinderState::MENU_SELECTION; raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false); return 1; }
-        if (isSelect)  {
-            if (friendListIndex == 0) { // "Back" selected
-                currentState = FriendFinderState::MENU_SELECTION;
-                raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-            } else { // A friend was selected
-                overlayIndex = 0; // Default to "Track"
-                currentState = FriendFinderState::FRIEND_LIST_ACTION;
-                screen->forceDisplay();
-            }
-            return 1;
-        }
-        return 0;
-    }
-
-    /* ---------- Friend Map (Single Button Logic) ---------- */
     if (currentState == FriendFinderState::FRIEND_MAP) {
-        if (friendMapMenuVisible) {
-            // --- Menu is OPEN ---
-            if (isNavDown) { // Short press: navigate menu
-                friendMapMenuIndex = (friendMapMenuIndex + 1) % NUM_MAP_MENU;
-                screen->forceDisplay();
-                return 1;
-            }
-            if (isSelect) { // Long press: select menu item
-                switch(friendMapMenuIndex) {
-                    case 0: // Toggle Names
-                        friendMapNamesVisible = !friendMapNamesVisible;
-                        break;
-                    case 1: // Back to Map
-                        // No action needed, just close menu
-                        break;
-                    case 2: // Exit
-                        currentState = FriendFinderState::MENU_SELECTION;
-                        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-                        break;
-                }
-                friendMapMenuVisible = false; // Close menu after action
-                screen->forceDisplay();
-                return 1;
-            }
-        } else {
-            // --- Menu is CLOSED ---
-            if (isSelect) { // Long press: open the menu
-                friendMapMenuVisible = true;
-                friendMapMenuIndex = 0;
-                screen->forceDisplay();
-                return 1;
-            }
+        if (isSelect) {
+            graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_map_menu;
+            screen->runNow();
+            return 1;
         }
-
-        // Double press (back) exits the map screen regardless of menu state
         if (isBack) {
-            currentState = FriendFinderState::MENU_SELECTION;
-            raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-            return 1;
-        }
-
-        return 0; // Consume all other inputs
-    }
-
-    /* ---------- Calibration Submenu ---------- */
-    if (currentState == FriendFinderState::CALIBRATION_MENU) {
-        if (isNavUp)   { calibrationMenuIndex = (calibrationMenuIndex + NUM_CAL_MENU - 1) % NUM_CAL_MENU; screen->forceDisplay(); return 1; }
-        if (isNavDown) { calibrationMenuIndex = (calibrationMenuIndex + 1) % NUM_CAL_MENU; screen->forceDisplay(); return 1; }
-        if (isBack) { currentState = FriendFinderState::MENU_SELECTION; screen->forceDisplay(); return 1; }
-        if (isSelect) {
-            switch (calibrationMenuIndex) {
-            case 0: // Back
-                currentState = FriendFinderState::MENU_SELECTION;
-                screen->forceDisplay();
-                break;
-            case 1: // Calibrate Compass (figure-8)
-                if (magnetometerModule) {
-                    magnetometerModule->startFigure8Calibration(15000);
-#if HAS_SCREEN
-                    screen->showSimpleBanner("Compass Cal: move in a FIGURE-8 for 15s", 1800);
-#endif
-                    LOG_INFO("[FriendFinder] Requested FIGURE-8 calibration (15s).");
-                } else {
-#if HAS_SCREEN
-                    screen->showSimpleBanner("No magnetometer", 1200);
-#endif
-                }
-                break;
-            case 2: // Flat-Spin Cal (table)
-                if (magnetometerModule) {
-                    magnetometerModule->startFlatSpinCalibration(12000);
-#if HAS_SCREEN
-                    screen->showSimpleBanner("Spin slowly on table CLOCKWISE FOR 12s", 1600);
-#endif
-                    LOG_INFO("[FriendFinder] Requested FLAT-SPIN calibration (12s).");
-                } else {
-#if HAS_SCREEN
-                    screen->showSimpleBanner("No magnetometer", 1200);
-#endif
-                }
-                break;
-            case 3: // Set North Here (user zero)
-                if (magnetometerModule && magnetometerModule->hasHeading()) {
-                    magnetometerModule->setNorthHere();
-#if HAS_SCREEN
-                    screen->showSimpleBanner("North set to current heading", 1200);
-#endif
-                } else {
-#if HAS_SCREEN
-                    screen->showSimpleBanner("Heading not ready", 800);
-#endif
-                }
-                break;
-            case 4: // Clear North Offset
-                if (magnetometerModule) {
-                    magnetometerModule->clearNorthOffset();
-#if HAS_SCREEN
-                    screen->showSimpleBanner("North offset cleared", 1000);
-#endif
-                }
-                break;
-            case 5: // Dump Compass Cal to log
-                if (magnetometerModule) {
-                    magnetometerModule->dumpCalToLog();
-#if HAS_SCREEN
-                    screen->showSimpleBanner("Cal dumped to log", 1000);
-#endif
-                }
-                break;
-            }
+            setState(FriendFinderState::IDLE);
             return 1;
         }
         return 0;
     }
 
-    /* ---------- friend-list action menu ("Track / Remove / Back") ---------- */
-    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
-        if (isNavUp)   { overlayIndex = (overlayIndex + NUM_FRIEND_ACTIONS - 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
-        if (isNavDown) { overlayIndex = (overlayIndex + 1) % NUM_FRIEND_ACTIONS; screen->forceDisplay(); return 1; }
-        if (isBack) { currentState = FriendFinderState::FRIEND_LIST; screen->forceDisplay(); return 1; }
-        if (isSelect) {
-            // friendListIndex is the raw index from the friend list (1=first friend)
-            const int slot = getFriendSlotByListIndex(friendListIndex);
-            
-            switch (overlayIndex) {
-            case 0: // Track
-                if (slot >= 0) requestMutualTracking(friends_[slot].node);
-                break;
-            case 1: // Remove
-                if (slot >= 0) {
-                    removeFriendAt(friendListIndex);
-                    int cnt = getUsedFriendsCount();
-                    // Go back to friend list, or menu if list is now empty
-                    if (cnt == 0) {
-                        currentState = FriendFinderState::MENU_SELECTION;
-                        screen->showSimpleBanner("No friends saved", 1200);
-                        raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-                    } else {
-                        friendListIndex = std::min(friendListIndex, cnt); // cnt is now count+1 for "Back" item
-                        currentState = FriendFinderState::FRIEND_LIST;
-                        screen->forceDisplay();
-                    }
-                }
-                break;
-            case 2: // Back
-                currentState = FriendFinderState::FRIEND_LIST;
-                screen->forceDisplay();
-                break;
-            }
-            return 1;
-        }
-        return 0;
-    }
-
-    /* ---------- friend-list Browse ---------- */
-    if (currentState == FriendFinderState::FRIEND_LIST) {
-        // Total items = number of friends + 1 for "Back"
-        int cnt = getUsedFriendsCount() + 1;
-        
-        if (isNavUp)   { friendListIndex = (friendListIndex + cnt - 1) % cnt; screen->forceDisplay(); return 1; }
-        if (isNavDown) { friendListIndex = (friendListIndex + 1) % cnt; screen->forceDisplay(); return 1; }
-        if (isBack) { currentState = FriendFinderState::MENU_SELECTION; raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false); return 1; }
-        if (isSelect)  {
-            if (friendListIndex == 0) { // "Back" selected
-                currentState = FriendFinderState::MENU_SELECTION;
-                raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-            } else { // A friend was selected
-                overlayIndex = 0; // Default to "Track"
-                currentState = FriendFinderState::FRIEND_LIST_ACTION;
-                screen->forceDisplay();
-            }
-            return 1;
-        }
-        return 0;
-    }
-
-    // In-session menu
-    if (currentState == FriendFinderState::TRACKING_MENU) {
-        if (isNavUp)   { overlayIndex = (overlayIndex + NUM_OVERLAY - 1) % NUM_OVERLAY; screen->forceDisplay(); return 1; }
-        if (isNavDown) { overlayIndex = (overlayIndex + 1) % NUM_OVERLAY; screen->forceDisplay(); return 1; }
-        if (isBack) {
-            currentState = previousState; // Go back to tracking view
-            screen->forceDisplay();
-            return 1;
-        }
-        if (isSelect) {
-            switch (overlayIndex) {
-            case 0: // Stop Tracking
-                endSession(/*notifyPeer*/true);
-                break;
-            case 1: // Back
-                currentState = previousState;
-                screen->forceDisplay();
-                break;
-            }
-            return 1;
-        }
-        return 0;
-    }
-
-    // In session: SELECT opens menu
     if (currentState == FriendFinderState::TRACKING_TARGET ||
         currentState == FriendFinderState::BEING_TRACKED)
     {
         if (isSelect) {
             previousState = currentState;
-            currentState = FriendFinderState::TRACKING_MENU;
-            overlayIndex = 0; // Re-use overlayIndex for menu index
-            screen->forceDisplay();
+            graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_session_menu;
+            screen->runNow();
             return 1;
         }
-        if (isBack) { // Allow ending session with BACK button from main tracking screen
-            endSession(/*notifyPeer*/true);
-            return 1;
-        }
-        return 0;
-    }
-
-    // In-frame main menu (fast)
-    if (currentState == FriendFinderState::MENU_SELECTION) {
-        if (isNavUp)   { menuIndex = (menuIndex + NUM_MENU - 1) % NUM_MENU; screen->forceDisplay(); return 1; }
-        if (isNavDown) { menuIndex = (menuIndex + 1) % NUM_MENU; screen->forceDisplay(); return 1; }
         if (isBack) {
-            currentState = FriendFinderState::IDLE;
-            pairingWindowOpen = false;
-            raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+            endSession(true);
             return 1;
-        }
-        if (isSelect) {
-            switch (menuIndex) {
-            case 0: // Back/Exit
-                currentState = FriendFinderState::IDLE;
-                pairingWindowOpen = false;
-                raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
-                return 1;
-            case 1: // Start Pairing
-                beginPairing();
-                return 1;
-            case 2: // Track a Friend
-#if HAS_SCREEN
-                if (getUsedFriendsCount() > 0) {
-                    friendListIndex = 0; // Default to "Back"
-                    currentState = FriendFinderState::FRIEND_LIST;
-                    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
-                } else {
-                    screen->showSimpleBanner("No friends saved", 1200);
-                }
-#endif
-                return 1;
-            case 3: // Friend Map
-#if HAS_SCREEN
-                currentState = FriendFinderState::FRIEND_MAP;
-                // Reset map UI state on entry
-                friendMapMenuVisible = false;
-                friendMapNamesVisible = true;
-                raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
-#endif
-                return 1;
-            case 4: // Compass Calibration
-                calibrationMenuIndex = 0; // Default to "Back"
-                currentState = FriendFinderState::CALIBRATION_MENU;
-                raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
-                return 1;
-            }
         }
         return 0;
     }
@@ -736,19 +432,23 @@ int FriendFinderModule::handleInputEvent(const InputEvent *ev)
     return 0;
 }
 
-/* ---------- Thread ---------- */
 int32_t FriendFinderModule::runOnce()
 {
     const uint32_t now = millis();
 
-    // When map is open, force redraws to keep it live
+    if (currentState == FriendFinderState::PAIRING_DISCOVERY) {
+        if ((now - lastSentPacketTime) > 5000UL) { // Re-broadcast every 5 seconds
+            LOG_DEBUG("[FriendFinder] Re-broadcasting pairing request");
+            sendFriendFinderPacket(NODENUM_BROADCAST, meshtastic_FriendFinder_RequestType_REQUEST, 1);
+        }
+    }
+
     if (currentState == FriendFinderState::FRIEND_MAP) {
 #if HAS_SCREEN
         raiseUIEvent(UIFrameEvent::Action::REDRAW_ONLY);
 #endif
     }
 
-    // Send periodic background updates to all friends when idle
     if (currentState == FriendFinderState::IDLE && getUsedFriendsCount() > 0 && gpsStatus->getHasLock()) {
         if (!lastBackgroundUpdateTime || (now - lastBackgroundUpdateTime) > (BACKGROUND_UPDATE_INTERVAL * 1000UL)) {
             LOG_INFO("[FriendFinder] Sending background location updates to %d friends.", getUsedFriendsCount());
@@ -763,35 +463,39 @@ int32_t FriendFinderModule::runOnce()
 
     if (pairingWindowOpen && (int32_t)(now - pairingWindowExpiresAt) >= 0) {
         pairingWindowOpen = false;
-        if (currentState == FriendFinderState::AWAITING_RESPONSE) {
-            currentState = FriendFinderState::MENU_SELECTION;
+        if (currentState == FriendFinderState::AWAITING_RESPONSE ||
+            currentState == FriendFinderState::PAIRING_DISCOVERY ||
+            currentState == FriendFinderState::AWAITING_CONFIRMATION ||
+            currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE) {
+            currentState = FriendFinderState::IDLE;
+            pairingCandidateNodeNum = 0;
+            raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
 #if HAS_SCREEN
-            screen->showSimpleBanner("Request timed out", 1200);
+            screen->showSimpleBanner("Pairing timed out", 1200);
 #endif
         }
     }
 
-    // Show small progress to user during calibration (non-blocking)
 #if HAS_SCREEN
     if (magnetometerModule) {
         const bool calNow = magnetometerModule->isCalibrating();
         if (calNow && !calWasActive) {
             calWasActive = true;
-            screen->showSimpleBanner("Calibrating… move in FIGURE-8", 1200);
+            screen->showSimpleBanner("Move in FIGURE-8", 15000);
         }
         if (!calNow && calWasActive) {
             calWasActive = false;
-            screen->showSimpleBanner("Compass calibration done", 1200);
+            screen->showSimpleBanner("Calibration done", 1200);
         }
 
         const bool flatNow = magnetometerModule->isFlatCalibrating();
         if (flatNow && !flatCalWasActive) {
             flatCalWasActive = true;
-            screen->showSimpleBanner("Calibrating… spin flat on table", 1200);
+            screen->showSimpleBanner("Spin device CLOCKWISE", 15000);
         }
         if (!flatNow && flatCalWasActive) {
             flatCalWasActive = false;
-            screen->showSimpleBanner("Flat-spin calibration done", 1200);
+            screen->showSimpleBanner("Calibration done", 1200);
         }
     }
 #endif
@@ -806,7 +510,6 @@ int32_t FriendFinderModule::runOnce()
 #if HAS_SCREEN
         if (shouldDraw()) raiseUIEvent(UIFrameEvent::Action::REDRAW_ONLY);
 #endif
-        // Tracker also beacons its own stats every UPDATE_INTERVAL seconds
         if ((now - lastSentPacketTime) > UPDATE_INTERVAL * 1000UL && targetNodeNum) {
             sendFriendFinderPacket(targetNodeNum, meshtastic_FriendFinder_RequestType_NONE);
         }
@@ -814,90 +517,97 @@ int32_t FriendFinderModule::runOnce()
     default: break;
     }
 
-    // Snappy UI
-    return 50; // ~20 FPS
+    return 50;
 }
 
-/* ---------- RX ---------- */
 bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
                                                 meshtastic_FriendFinder *ff)
 {
     const uint32_t from = getFrom(&mp);
     if (from == nodeDB->getNodeNum()) return true;
 
-    const bool hasFF = mp.decoded.has_friend_finder;
-    if (!hasFF) return false;
+    if (!mp.decoded.has_friend_finder) return false;
 
-    LOG_INFO("[FriendFinder] RX pkt id=0x%08x from=0x%08x port=%u hop=%u/%u chan=%u",
-             (unsigned)mp.id, (unsigned)from, (unsigned)mp.decoded.portnum,
+    LOG_INFO("[FriendFinder] RX pkt id=0x%08x from=0x%08x to=0x%08x port=%u hop=%u/%u chan=%u",
+             (unsigned)mp.id, (unsigned)from, (unsigned)mp.to, (unsigned)mp.decoded.portnum,
              (unsigned)mp.hop_limit, (unsigned)mp.hop_start, (unsigned)mp.channel);
 
     if (mp.decoded.payload.size) hexdump("RX raw", mp.decoded.payload.bytes, mp.decoded.payload.size);
 
-    LOG_INFO("[FriendFinder] RX FF type=%s(%d) batt=%u sats=%u lat=%d lon=%d time=%u state=%d pairingOpen=%d",
+    LOG_INFO("[FriendFinder] RX FF type=%s(%d) batt=%u sats=%u lat=%d lon=%d time=%u state=%d",
              ffTypeName(ff->request_type), (int)ff->request_type,
              (unsigned)ff->battery_level, (unsigned)ff->sats_in_view,
              (int)ff->latitude_i, (int)ff->longitude_i, (unsigned)ff->time,
-             (int)currentState, (int)pairingWindowOpen);
+             (int)currentState);
 
     switch (ff->request_type) {
     case meshtastic_FriendFinder_RequestType_REQUEST: {
-        // A directed request from a friend, or a broadcast request while we are in the pairing window
-        bool isDirectedRequest = (findFriend(from) >= 0);
-        bool isInPairingWindow = pairingWindowOpen;
+        if (currentState == FriendFinderState::PAIRING_DISCOVERY) {
+            showConfirmationPrompt(from);
+            return true;
+        }
 
-        if (isDirectedRequest || isInPairingWindow) {
-            // Become tracked by the requester
+        bool isDirectedRequestToMe = (mp.to == nodeDB->getNodeNum());
+        if (isDirectedRequestToMe && (findFriend(from) >= 0 || currentState == FriendFinderState::AWAITING_RESPONSE)) {
             targetNodeNum = from;
             currentState  = FriendFinderState::BEING_TRACKED;
-            previousDistance = -1.0f; // Reset distance trend
-            activateHighGpsMode(); // Activate real-time GPS
+            activateHighGpsMode();
             pairingWindowOpen = false;
 
-            // If it's a new friend from a broadcast pairing, create the record now
-            if (!isDirectedRequest && isInPairingWindow) {
-                uint32_t sess = (uint32_t)random(1, 0x7fffffff);
-                uint8_t  sec[16]; for (int i = 0; i < 16; ++i) sec[i] = random(0, 255);
-                upsertFriend(from, sess, sec);
-                LOG_INFO("[FriendFinder] New friend from pairing window -> ACCEPT");
-            } else {
-                 LOG_INFO("[FriendFinder] REQUEST from existing friend -> ACCEPT");
+            if (findFriend(from) < 0) {
+                 uint32_t sess = (uint32_t)random(1, 0x7fffffff);
+                 uint8_t sec[16]; for (int i = 0; i < 16; ++i) sec[i] = random(0, 255);
+                 upsertFriend(from, sess, sec);
             }
-            
+            LOG_INFO("[FriendFinder] Directed request from 0x%08x -> ACCEPT", from);
             sendFriendFinderPacket(from, meshtastic_FriendFinder_RequestType_ACCEPT);
 #if HAS_SCREEN
             raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
 #endif
             return true;
         }
-
-        // It's a broadcast request and we aren't in a pairing window.
-#if HAS_SCREEN
-        screen->showSimpleBanner("Hold Pair on both devices", 1200);
-#endif
         return true;
     }
 
     case meshtastic_FriendFinder_RequestType_ACCEPT: {
-        // We sent a request and the other person accepted.
         if (currentState == FriendFinderState::AWAITING_RESPONSE && from == targetNodeNum) {
-            currentState  = FriendFinderState::TRACKING_TARGET;
-            previousDistance = -1.0f; // Reset distance trend
-            activateHighGpsMode(); // Activate real-time GPS
+            LOG_INFO("[FriendFinder] Tracking request to 0x%08x was accepted.", (unsigned)from);
+            currentState = FriendFinderState::TRACKING_TARGET;
+            activateHighGpsMode();
             pairingWindowOpen = false;
-            lastFriendPacketTime = millis();
-            lastFriendData = *ff;
-
-            // If we weren't already friends, save them now.
-            if (findFriend(from) < 0) {
-                uint32_t sess = (uint32_t)random(1, 0x7fffffff);
-                uint8_t  sec[16]; for (int i = 0; i < 16; ++i) sec[i] = random(0, 255);
-                upsertFriend(from, sess, sec);
-            }
-
-#if HAS_SCREEN
             raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
-#endif
+            return true;
+        }
+
+        if (currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE && from == pairingCandidateNodeNum) {
+            LOG_INFO("[FriendFinder] Received final acceptance from 0x%08x. Pairing complete!", (unsigned)from);
+            completePairing(from);
+            return true;
+        }
+        else if (currentState == FriendFinderState::PAIRING_DISCOVERY) {
+            LOG_INFO("[FriendFinder] Received an ACCEPT from 0x%08x while in discovery, treating as proposal.", (unsigned)from);
+            showConfirmationPrompt(from);
+            return true;
+        }
+        break;
+    }
+
+    case meshtastic_FriendFinder_RequestType_REJECT: {
+        if (currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE && from == pairingCandidateNodeNum) {
+            LOG_INFO("[FriendFinder] Peer 0x%08x rejected the pairing request.", (unsigned)from);
+            
+            if (pairingWindowOpen && (int32_t)(millis() - pairingWindowExpiresAt) < 0) {
+                currentState = FriendFinderState::PAIRING_DISCOVERY;
+                pairingCandidateNodeNum = 0;
+                screen->showSimpleBanner("Peer rejected pair", 1500);
+                raiseUIEvent(UIFrameEvent::Action::REDRAW_ONLY);
+            } else {
+                currentState = FriendFinderState::IDLE;
+                pairingWindowOpen = false;
+                pairingCandidateNodeNum = 0;
+                screen->showSimpleBanner("Pairing failed", 1200);
+                raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET_BACKGROUND, false);
+            }
         }
         break;
     }
@@ -909,13 +619,18 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
 #if HAS_SCREEN
             screen->showSimpleBanner("Session ended by peer", 1200);
 #endif
-            endSession(/*notifyPeer*/false);
+            endSession(false);
         }
         break;
     }
 
     case meshtastic_FriendFinder_RequestType_NONE: {
-        // If this is a known friend, store their latest data for quick-start tracking.
+        if (currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE && from == pairingCandidateNodeNum) {
+            LOG_INFO("[FriendFinder] Received final pairing confirmation from 0x%08x.", (unsigned)from);
+            completePairing(from);
+            return true;
+        }
+
         const int friend_idx = findFriend(from);
         if (friend_idx >= 0) {
             friends_[friend_idx].last_data = *ff;
@@ -923,7 +638,6 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
             LOG_DEBUG("[FriendFinder] Stored background update from friend 0x%08x", from);
         }
 
-        // If this update is for our current tracking target, also update the live session variables.
         if (from == targetNodeNum) {
             lastFriendData = *ff;
             lastFriendPacketTime = millis();
@@ -939,7 +653,6 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
     return true;
 }
 
-/* ---------- TX ---------- */
 void FriendFinderModule::sendFriendFinderPacket(uint32_t dst,
                                                 meshtastic_FriendFinder_RequestType type,
                                                 uint8_t hopLimit)
@@ -969,7 +682,6 @@ void FriendFinderModule::sendFriendFinderPacket(uint32_t dst,
     fff->battery_level = powerStatus->getBatteryChargePercent();
     fff->time          = getValidTime(RTCQualityFromNet);
 
-    // Mirror to payload bytes so Router can carry it uniformly
     {
         pb_ostream_t os = pb_ostream_from_buffer(p->decoded.payload.bytes,
                                                  sizeof(p->decoded.payload.bytes));
@@ -980,7 +692,6 @@ void FriendFinderModule::sendFriendFinderPacket(uint32_t dst,
         }
     }
 
-    // Debug exact on-wire bytes
     size_t enc = 0;
     bool ok = pb_get_encoded_size(&enc, meshtastic_FriendFinder_fields, fff);
     LOG_DEBUG("[FriendFinder] TX pkt id=0x%08x to=0x%08x port=%u hop=%u type=%s(%d) encSize=%u ok=%d",
@@ -1002,7 +713,7 @@ const char *FriendFinderModule::getNodeName(uint32_t nodeNum)
 {
     if (nodeNum == NODENUM_BROADCAST) return "Broadcast";
     meshtastic_NodeInfoLite *info = nodeDB->getMeshNode(nodeNum);
-    static char fallback[32]; 
+    static char fallback[32];
 
     if (info && info->has_user) {
         if (strlen(info->user.long_name) > 0) return info->user.long_name;
@@ -1019,13 +730,12 @@ const char *FriendFinderModule::getNodeName(uint32_t nodeNum)
 const char *FriendFinderModule::getShortName(uint32_t nodeNum)
 {
     meshtastic_NodeInfoLite *info = nodeDB->getMeshNode(nodeNum);
-    static char fallback[5]; // "XXXX\0"
+    static char fallback[5];
 
     if (info && info->has_user && strlen(info->user.short_name) > 0) {
         return info->user.short_name;
     }
-    
-    // Fallback to last 4 hex digits of node number
+
     snprintf(fallback, sizeof(fallback), "%04X", (unsigned)(nodeNum & 0xFFFF));
     return fallback;
 }
@@ -1040,90 +750,7 @@ void FriendFinderModule::raiseUIEvent(UIFrameEvent::Action a, bool focus)
 #endif
 }
 
-/* ---------- Drawing ---------- */
 #if HAS_SCREEN
-
-// --- helpers (drawing only) ---
-void FriendFinderModule::drawMenuList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
-                         const char* const* rows, int N, int sel, const char *title)
-{
-    d->setFont(FONT_SMALL);
-    const int titleH = FONT_HEIGHT_SMALL;
-    const int rowH   = FONT_HEIGHT_SMALL + 2;
-    const int top    = y + titleH + 2;
-
-    // Title
-    d->drawString(x + 2, y, title);
-
-    // How many rows fit?
-    const int maxR  = std::max(1, (H - (top - y)) / rowH);
-    const int first = std::max(0, std::min(sel - maxR / 2, N - maxR));
-
-    for (int r = 0; r < maxR && (first + r) < N; ++r) {
-        const int yy = top + r * rowH;
-        const bool isSel = (first + r == sel);
-        if (isSel) d->drawString(x + 0, yy, ">");
-        d->drawString(x + 10, yy, rows[first + r]);
-    }
-}
-
-void FriendFinderModule::drawFriendList(OLEDDisplay *d, int16_t x, int16_t y, int W, int H, int sel)
-{
-    d->setFont(FONT_SMALL);
-    const int titleH = FONT_HEIGHT_SMALL;
-    const int rowH   = FONT_HEIGHT_SMALL + 2;
-    const int top    = y + titleH + 2;
-
-    // Title
-    d->drawString(x + 2, y, "Track a Friend");
-
-    const int friendCount = getUsedFriendsCount();
-    const int totalRows = friendCount + 1; // +1 for "Back"
-
-    // How many rows fit?
-    const int maxR  = std::max(1, (H - (top - y)) / rowH);
-    const int first = std::max(0, std::min(sel - maxR / 2, totalRows - maxR));
-
-    for (int r = 0; r < maxR && (first + r) < totalRows; ++r) {
-        const int listIdx = first + r; // 0 is "Back", 1 is first friend, etc.
-        const int yy = top + r * rowH;
-        const bool isSel = (listIdx == sel);
-        if (isSel) d->drawString(x + 0, yy, ">");
-        
-        if (listIdx == 0) {
-            d->drawString(x + 10, yy, "Back");
-            continue;
-        }
-
-        // It's a friend, get their details
-        const int slot = getFriendSlotByListIndex(listIdx);
-        if (slot < 0) continue; 
-
-        char lineBuf[48];
-        const char *name = getNodeName(friends_[slot].node);
-        
-        // Calculate and append distance if possible
-        char distBuf[16] = "(?\\?)";
-        const auto& peerData = friends_[slot].last_data;
-        if (gpsStatus->getHasLock() && (peerData.latitude_i != 0 || peerData.longitude_i != 0)) {
-            GeoCoord me(gpsStatus->getLatitude(), gpsStatus->getLongitude(), 0);
-            GeoCoord fr(peerData.latitude_i, peerData.longitude_i, 0);
-            float dist = me.distanceTo(fr);
-
-            if (config.display.units == meshtastic_Config_DisplayConfig_DisplayUnits_IMPERIAL) {
-                float feet = dist * METERS_TO_FEET;
-                if (feet < 1000) snprintf(distBuf, sizeof(distBuf), "(%.0fft)", feet);
-                else snprintf(distBuf, sizeof(distBuf), "(%.1fmi)", feet / MILES_TO_FEET);
-            } else {
-                if (dist < 1000) snprintf(distBuf, sizeof(distBuf), "(%.0fm)", dist);
-                else snprintf(distBuf, sizeof(distBuf), "(%.1fkm)", dist / 1000.0f);
-            }
-        }
-        
-        snprintf(lineBuf, sizeof(lineBuf), "%s %s", name, distBuf);
-        d->drawString(x + 10, yy, lineBuf);
-    }
-}
 
 void FriendFinderModule::drawFriendMap(OLEDDisplay *d, int16_t x, int16_t y, int W, int H)
 {
@@ -1132,8 +759,7 @@ void FriendFinderModule::drawFriendMap(OLEDDisplay *d, int16_t x, int16_t y, int
     const int16_t cy = y + H / 2;
     const int16_t mapRadius = std::min(W, H) / 2 - 2;
 
-    // Title
-    d->drawString(x + 2, y, "Friend Map");
+    // d->drawString(x + 2, y, "Friend Map");
 
     if (!gpsStatus->getHasLock()) {
         d->setTextAlignment(TEXT_ALIGN_CENTER);
@@ -1141,7 +767,6 @@ void FriendFinderModule::drawFriendMap(OLEDDisplay *d, int16_t x, int16_t y, int
         return;
     }
 
-    // Find the maximum distance to any friend to set the scale
     float maxDist = 0.0f;
     for (const auto& f : friends_) {
         if (f.used && (f.last_data.latitude_i != 0 || f.last_data.longitude_i != 0)) {
@@ -1150,31 +775,26 @@ void FriendFinderModule::drawFriendMap(OLEDDisplay *d, int16_t x, int16_t y, int
             maxDist = std::max(maxDist, (float)me.distanceTo(fr));
         }
     }
-    if (maxDist < 50.0f) maxDist = 50.0f; // Min scale distance
+    if (maxDist < 10.0f) maxDist = 10.0f;
 
-    // Calculate scale and get heading
     float scale = (float)mapRadius / maxDist;
-    float headingRad = (magnetometerModule && magnetometerModule->hasHeading()) 
+    float headingRad = (magnetometerModule && magnetometerModule->hasHeading())
                      ? (magnetometerModule->getHeading() * M_PI / 180.0f) : 0.0f;
 
-    // Draw scale text
     char scaleBuf[32];
     snprintf(scaleBuf, sizeof(scaleBuf), "%.1fm/px", 1.0f / scale);
     d->setTextAlignment(TEXT_ALIGN_RIGHT);
     d->drawString(x + W - 2, y, scaleBuf);
 
-    // Draw North Indicator
     float northAngle = (config.display.compass_north_top == false) ? -headingRad : 0.0f;
-    int16_t nx = cx + (mapRadius - FONT_HEIGHT_SMALL) * sinf(northAngle);
-    int16_t ny = cy - (mapRadius - FONT_HEIGHT_SMALL) * cosf(northAngle);
+    int16_t nx = cx - (mapRadius - FONT_HEIGHT_SMALL) * sinf(northAngle);
+    int16_t ny = cy + (mapRadius - FONT_HEIGHT_SMALL) * cosf(northAngle);
     d->setTextAlignment(TEXT_ALIGN_CENTER);
-    d->drawString(nx, ny - (FONT_HEIGHT_SMALL / 2), "N");
+    d->drawString(nx, ny - (FONT_HEIGHT_SMALL / 2), "");
 
-    // Draw self (center dot)
     d->fillCircle(cx, cy, 2);
     d->drawCircle(cx, cy, 2);
 
-    // Draw friends
     GeoCoord me(gpsStatus->getLatitude(), gpsStatus->getLongitude(), 0);
     for (const auto& f : friends_) {
         if (f.used && (f.last_data.latitude_i != 0 || f.last_data.longitude_i != 0)) {
@@ -1183,27 +803,21 @@ void FriendFinderModule::drawFriendMap(OLEDDisplay *d, int16_t x, int16_t y, int
             float distance = me.distanceTo(fr);
             float screenAngle = bearingRad;
             if (config.display.compass_north_top == false) {
-                screenAngle -= headingRad; // Rotate map for "heading up" view
+                screenAngle -= headingRad;
             }
             float screenDist = distance * scale;
-            if (screenDist > mapRadius) screenDist = mapRadius; // Clamp to edge
+            if (screenDist > mapRadius) screenDist = mapRadius;
 
-            int16_t friendX = cx + screenDist * sinf(screenAngle);
-            int16_t friendY = cy - screenDist * cosf(screenAngle);
+            int16_t friendX = cx - screenDist * sinf(screenAngle);
+            int16_t friendY = cy + screenDist * cosf(screenAngle);
 
             d->drawCircle(friendX, friendY, 2);
-            
+
             if (friendMapNamesVisible) {
                 const char* name = getShortName(f.node);
                 d->drawString(friendX + 4, friendY - (FONT_HEIGHT_SMALL/2), name);
             }
         }
-    }
-
-    // Draw the map menu overlay if visible
-    if (friendMapMenuVisible) {
-        static const char* rows[NUM_MAP_MENU] = { "Toggle Names", "Back to Map", "Exit" };
-        this->drawMenuList(d, x, y, W, H, rows, NUM_MAP_MENU, friendMapMenuIndex, "Map Menu");
     }
 }
 
@@ -1216,7 +830,7 @@ static inline const char* truncName(const char* s, char* out, size_t outsz, int 
     if (maxChars <= 1) { strlcpy(out, s, outsz); return out; }
     size_t keep = (size_t)maxChars - 1;
     memcpy(out, s, keep);
-    out[keep] = '\xEF'; // '…' fallback glyph if needed
+    out[keep] = '\xEF';
     out[keep + 1] = 0;
     return out;
 }
@@ -1232,23 +846,23 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
 {
     d->setFont(FONT_SMALL);
     char nameBuf[24];
-    char distBuf[16], bearingBuf[16], agoBuf[16], batBuf[16], satsBuf[16];
+    char distBuf[16], agoBuf[16], batBuf[16], satsBuf[16];
 
     truncName(peerName, nameBuf, sizeof(nameBuf), 12);
 
     bool havePeerPos = (peerData.latitude_i != 0 || peerData.longitude_i != 0);
     bool haveBoth = haveFix && havePeerPos;
-    float bearingDeg = 0;
+    float bearingDeg = 0; // Still needed for arrow calculation
     if (haveBoth) {
         GeoCoord me(myLat, myLon, 0);
         GeoCoord fr(peerData.latitude_i, peerData.longitude_i, 0);
         float currentDistance = me.distanceTo(fr);
         bearingDeg = me.bearingTo(fr) * 180 / PI; if (bearingDeg < 0) bearingDeg += 360;
-        
+
         char trendIndicator[3] = " ";
         if(previousDistance >= 0.0f) {
-            if(currentDistance < previousDistance - 1.0f) trendIndicator[0] = 25; // Down arrow
-            else if (currentDistance > previousDistance + 1.0f) trendIndicator[0] = 24; // Up arrow
+            if(currentDistance < previousDistance - 1.0f) trendIndicator[0] = 25;
+            else if (currentDistance > previousDistance + 1.0f) trendIndicator[0] = 24;
         }
         previousDistance = currentDistance;
 
@@ -1260,10 +874,8 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
             if (currentDistance < 1000) snprintf(distBuf, sizeof(distBuf), "%.0fm%s", currentDistance, trendIndicator);
             else snprintf(distBuf, sizeof(distBuf), "%.1fkm%s", currentDistance / 1000, trendIndicator);
         }
-        snprintf(bearingBuf, sizeof(bearingBuf), "%.0f\xB0", bearingDeg); // Degree symbol
     } else {
         strlcpy(distBuf, "--      ", sizeof(distBuf));
-        strlcpy(bearingBuf, "--\xB0", sizeof(bearingBuf));
         previousDistance = -1.0f;
     }
 
@@ -1277,124 +889,115 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
     } else {
         snprintf(agoBuf, sizeof(agoBuf), "%lus ago", ageSec);
     }
-    
-    // --- New Layout ---
 
-    // 1. Header (minimal padding)
     const int headerH = FONT_HEIGHT_SMALL;
     char titleBuf[48];
     snprintf(titleBuf, sizeof(titleBuf), "Tracking: %s", nameBuf);
     d->setTextAlignment(TEXT_ALIGN_CENTER);
     d->drawString(x + W / 2, y, titleBuf);
-    // d->drawLine(x + 4, y + headerH, x + W - 4, y + headerH);
 
-    // 2. Content Area (Arrow)
-    const int footerH = FONT_HEIGHT_SMALL * 2; // Footer is just the two lines of text
-    const int contentH = H - headerH - footerH; // Maximized content area
-    
-    // Shift center point down slightly for a lower-slung arrow
+    const int footerH = FONT_HEIGHT_SMALL * 2;
+    const int contentH = H - headerH - footerH;
+
     const int cy = y + headerH + (contentH / 2) + 3;
     const int cx = x + W / 2;
 
-    if (haveBoth) {
-        const float headingRad = magnetometerModule && magnetometerModule->hasHeading()
-                                ? magnetometerModule->getHeading() * M_PI / 180.0f
-                                : 0.0f;
+    const bool haveHeading = (magnetometerModule && magnetometerModule->hasHeading()) && !forceNoMagnetometerView;
 
+    if (haveBoth && haveHeading) {
+        const float headingRad = magnetometerModule->getHeading() * M_PI / 180.0f;
         float arrowTheta = (bearingDeg * PI / 180.0f);
         if (config.display.compass_north_top == false) arrowTheta -= headingRad;
 
-        // Set arrow to fill 100% of the new, larger content area
         const float arrowSize = (float)contentH;
-        // Make the arrow very narrow/long to improve directionality
-        const float arrowWidth = arrowSize * 0.4f; 
+        const float arrowWidth = arrowSize * 0.4f;
 
-        // Define points for a simple triangle arrow pointing UP (0 rad) relative to origin (0,0)
-        float p1x = 0;                    float p1y = -arrowSize / 2.0f; // Tip
-        float p2x = -arrowWidth / 2.0f;   float p2y = arrowSize / 2.0f;  // Base-left
-        float p3x = arrowWidth / 2.0f;    float p3y = arrowSize / 2.0f;  // Base-right
+        float p1x = 0;                    float p1y = -arrowSize / 2.0f;
+        float p2x = -arrowWidth / 2.0f;   float p2y = arrowSize / 2.0f;
+        float p3x = arrowWidth / 2.0f;    float p3y = arrowSize / 2.0f;
 
-        // Rotate points
         float cos_a = cosf(arrowTheta);
         float sin_a = sinf(arrowTheta);
 
         int16_t r_p1x = p1x * cos_a - p1y * sin_a; int16_t r_p1y = p1x * sin_a + p1y * cos_a;
         int16_t r_p2x = p2x * cos_a - p2y * sin_a; int16_t r_p2y = p2x * sin_a + p2y * cos_a;
         int16_t r_p3x = p3x * cos_a - p3y * sin_a; int16_t r_p3y = p3x * sin_a + p3y * cos_a;
-        
-        // Translate to screen center and draw
-        d->fillTriangle(cx + r_p1x, cy + r_p1y, 
-                        cx + r_p2x, cy + r_p2y, 
+
+        d->fillTriangle(cx + r_p1x, cy + r_p1y,
+                        cx + r_p2x, cy + r_p2y,
                         cx + r_p3x, cy + r_p3y);
 
-    } else {
+    } else if (haveBoth) { // Have position, but NO magnetometer/heading
+        d->setTextAlignment(TEXT_ALIGN_CENTER);
+        d->setFont(FONT_LARGE);
+        d->drawString(cx, cy - (FONT_HEIGHT_LARGE / 2), distBuf);
+    }
+    else { // No peer position
         d->setTextAlignment(TEXT_ALIGN_CENTER);
         d->setFont(FONT_LARGE);
         d->drawString(cx, cy - (FONT_HEIGHT_LARGE / 2), "?");
     }
 
-    // 3. Footer Area (Stats)
-    const int footerY1 = y + H - (FONT_HEIGHT_SMALL * 2);
-    const int footerY2 = y + H - FONT_HEIGHT_SMALL;
+    // --- Footer ---
+    if (haveBoth && haveHeading) {
+        // Full footer when arrow is shown
+        const int footerY1 = y + H - (FONT_HEIGHT_SMALL * 2);
+        const int footerY2 = y + H - FONT_HEIGHT_SMALL;
+        d->setFont(FONT_SMALL);
 
-    d->setFont(FONT_SMALL);
+        // Top row: Sats and Age
+        d->setTextAlignment(TEXT_ALIGN_LEFT);
+        d->drawString(x + 2, footerY1, satsBuf);
+        d->setTextAlignment(TEXT_ALIGN_RIGHT);
+        d->drawString(x + W - 2, footerY1, agoBuf);
 
-    // Row 1: Distance | Data Age
-    d->setTextAlignment(TEXT_ALIGN_LEFT);
-    d->drawString(x + 2, footerY1, distBuf);
-    d->setTextAlignment(TEXT_ALIGN_RIGHT);
-    d->drawString(x + W - 2, footerY1, agoBuf);
-    
-    // Row 2: Bearing | Peer Battery | Peer Sats
-    d->setTextAlignment(TEXT_ALIGN_LEFT);
-    d->drawString(x + 2, footerY2, bearingBuf);
-    d->setTextAlignment(TEXT_ALIGN_CENTER);
-    d->drawString(x + W/2, footerY2, batBuf);
-    d->setTextAlignment(TEXT_ALIGN_RIGHT);
-    d->drawString(x + W - 2, footerY2, satsBuf);
+        // Bottom row: Distance and Battery
+        d->setTextAlignment(TEXT_ALIGN_LEFT);
+        d->drawString(x + 2, footerY2, distBuf);
+        d->setTextAlignment(TEXT_ALIGN_RIGHT);
+        d->drawString(x + W - 2, footerY2, batBuf);
+
+    } else if (haveBoth) {
+        // Simplified footer when distance is in the middle
+        const int footerY2 = y + H - FONT_HEIGHT_SMALL;
+        d->setFont(FONT_SMALL);
+        d->setTextAlignment(TEXT_ALIGN_LEFT);
+        d->drawString(x + 2, footerY2, satsBuf);
+        d->setTextAlignment(TEXT_ALIGN_CENTER);
+        d->drawString(x + W/2, footerY2, batBuf);
+        d->setTextAlignment(TEXT_ALIGN_RIGHT);
+        d->drawString(x + W - 2, footerY2, agoBuf);
+    }
 }
-
 
 void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {
     const int16_t W = display->getWidth();
     const int16_t H = display->getHeight();
 
-    // Fast in-frame menu
-    if (currentState == FriendFinderState::MENU_SELECTION) {
-        static const char* rows[NUM_MENU] = {
-            "Back/Exit",
-            "Start Pairing",
-            "Track a Friend",
-            "Friend Map",
-            "Compass Calibration"
-        };
-        this->drawMenuList(display, x, y, W, H, rows, NUM_MENU, menuIndex, "Friend Finder");
-        return;
-    }
+    if (currentState == FriendFinderState::PAIRING_DISCOVERY ||
+        currentState == FriendFinderState::AWAITING_CONFIRMATION ||
+        currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE) {
+        display->setFont(FONT_SMALL);
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->drawString(x + W / 2, y, "Friend Finder Pairing");
 
-    if (currentState == FriendFinderState::FRIEND_LIST) {
-        drawFriendList(display, x, y, W, H, friendListIndex);
-        return;
-    }
+        const int32_t remainMs = (int32_t)(pairingWindowOpen ? (pairingWindowExpiresAt - millis()) : 0);
+        const int remain = remainMs > 0 ? (remainMs + 999) / 1000 : 0;
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%ds left", remain);
+        display->setTextAlignment(TEXT_ALIGN_RIGHT);
+        display->drawString(x + W - 2, y, buf);
 
-    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
-        static const char *rows[NUM_FRIEND_ACTIONS] = { "Track", "Remove", "Back" };
-        const char *friendName = getNodeName(friends_[getFriendSlotByListIndex(friendListIndex)].node);
-        this->drawMenuList(display, x, y, W, H, rows, NUM_FRIEND_ACTIONS, overlayIndex, friendName);
-        return;
-    }   
-    
-    if (currentState == FriendFinderState::CALIBRATION_MENU) {
-        static const char* rows[NUM_CAL_MENU] = {
-            "Back",
-            "Figure-8 Cal",
-            "Flat-Spin Cal",
-            "Set North Here",
-            "Clear North Offset",
-            "Dump Cal to Log"
-        };
-        this->drawMenuList(display, x, y, W, H, rows, NUM_CAL_MENU, calibrationMenuIndex, "Compass Calibration");
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        if (currentState == FriendFinderState::PAIRING_DISCOVERY) {
+            display->drawString(x + W / 2, y + H / 2, "Looking for peers...");
+        } else if (currentState == FriendFinderState::AWAITING_CONFIRMATION) {
+            display->drawString(x + W / 2, y + H / 2 - (FONT_HEIGHT_SMALL/2), "Found peer!");
+            display->drawString(x + W / 2, y + H / 2 + (FONT_HEIGHT_SMALL/2), "Awaiting confirmation...");
+        } else { // AWAITING_FINAL_ACCEPTANCE
+             display->drawString(x + W / 2, y + H / 2, "Waiting for peer to accept...");
+        }
         return;
     }
 
@@ -1403,26 +1006,6 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
         return;
     }
 
-    if (currentState == FriendFinderState::FRIEND_LIST) {
-        drawFriendList(display, x, y, W, H, friendListIndex);
-        return;
-    }
-
-    if (currentState == FriendFinderState::FRIEND_LIST_ACTION) {
-        static const char *rows[NUM_FRIEND_ACTIONS] = { "Track", "Remove", "Back" };
-        const char *friendName = getNodeName(friends_[getFriendSlotByListIndex(friendListIndex)].node);
-        this->drawMenuList(display, x, y, W, H, rows, NUM_FRIEND_ACTIONS, overlayIndex, friendName);
-        return;
-    }   
-    
-    // In-session Menu
-    if (currentState == FriendFinderState::TRACKING_MENU) {
-        static const char* rows[NUM_OVERLAY] = {"Stop Tracking", "Back"};
-        this->drawMenuList(display, x, y, W, H, rows, NUM_OVERLAY, overlayIndex, "Session Menu");
-        return;
-    }
-
-    // Pairing wait page (no footer)
     if (currentState == FriendFinderState::AWAITING_RESPONSE) {
         display->setFont(FONT_SMALL);
         display->drawString(x + 2, y, "Friend Finder");
@@ -1436,7 +1019,6 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
         return;
     }
 
-    // Unified session page for both roles
     if (currentState == FriendFinderState::TRACKING_TARGET ||
         currentState == FriendFinderState::BEING_TRACKED)
     {
@@ -1455,17 +1037,15 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
                         haveFix, myLat, myLon, ageSec, this->lastFriendPacketTime);
     }
 }
-#endif // HAS_SCREEN
+#endif
 
 bool FriendFinderModule::shouldDraw()
 {
     return currentState == FriendFinderState::TRACKING_TARGET ||
            currentState == FriendFinderState::BEING_TRACKED ||
            currentState == FriendFinderState::AWAITING_RESPONSE ||
-           currentState == FriendFinderState::MENU_SELECTION ||
-           currentState == FriendFinderState::TRACKING_MENU   ||
-           currentState == FriendFinderState::FRIEND_LIST      ||
-           currentState == FriendFinderState::FRIEND_LIST_ACTION ||
-           currentState == FriendFinderState::CALIBRATION_MENU ||
-           currentState == FriendFinderState::FRIEND_MAP;
+           currentState == FriendFinderState::FRIEND_MAP ||
+           currentState == FriendFinderState::PAIRING_DISCOVERY || 
+           currentState == FriendFinderState::AWAITING_CONFIRMATION ||
+           currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE;
 }
