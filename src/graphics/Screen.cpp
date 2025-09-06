@@ -321,7 +321,7 @@ Screen::Screen(ScanI2C::DeviceAddress address, meshtastic_Config_DisplayConfig_O
     dispdev = new SSD1306Wire(address.address, -1, -1, geometry,
                               (address.port == ScanI2C::I2CPort::WIRE1) ? HW_I2C::I2C_TWO : HW_I2C::I2C_ONE);
 #elif defined(ST7735_CS) || defined(ILI9341_DRIVER) || defined(ILI9342_DRIVER) || defined(ST7701_CS) || defined(ST7789_CS) ||    \
-    defined(RAK14014) || defined(HX8357_CS) || defined(ILI9488_CS)
+    defined(RAK14014) || defined(HX8357_CS) || defined(ILI9488_CS) || defined(ST7796_CS)
     dispdev = new TFTDisplay(address.address, -1, -1, geometry,
                              (address.port == ScanI2C::I2CPort::WIRE1) ? HW_I2C::I2C_TWO : HW_I2C::I2C_ONE);
 #elif defined(USE_EINK) && !defined(USE_EINK_DYNAMICDISPLAY)
@@ -368,9 +368,6 @@ void Screen::doDeepSleep()
 {
 #ifdef USE_EINK
     setOn(false, graphics::UIRenderer::drawDeepSleepFrame);
-#ifdef PIN_EINK_EN
-    digitalWrite(PIN_EINK_EN, LOW); // power off backlight
-#endif
 #else
     // Without E-Ink display:
     setOn(false);
@@ -392,6 +389,14 @@ void Screen::handleSetOn(bool on, FrameCallback einkScreensaver)
 
 #if !ARCH_PORTDUINO
             dispdev->displayOn();
+#endif
+
+#ifdef PIN_EINK_EN
+            if (uiconfig.screen_brightness == 1)
+                digitalWrite(PIN_EINK_EN, HIGH);
+#elif defined(PCA_PIN_EINK_EN)
+            if (uiconfig.screen_brightness == 1)
+                io.digitalWrite(PCA_PIN_EINK_EN, HIGH);
 #endif
 
 #if defined(ST7789_CS) &&                                                                                                        \
@@ -423,11 +428,13 @@ void Screen::handleSetOn(bool on, FrameCallback einkScreensaver)
             // eInkScreensaver parameter is usually NULL (default argument), default frame used instead
             setScreensaverFrames(einkScreensaver);
 #endif
-#ifdef ELECROW_ThinkNode_M1
-            if (digitalRead(PIN_EINK_EN) == HIGH) {
-                digitalWrite(PIN_EINK_EN, LOW);
-            }
+
+#ifdef PIN_EINK_EN
+            digitalWrite(PIN_EINK_EN, LOW);
+#elif defined(PCA_PIN_EINK_EN)
+            io.digitalWrite(PCA_PIN_EINK_EN, LOW);
 #endif
+
             dispdev->displayOff();
 #ifdef USE_ST7789
             SPI1.end();
@@ -546,7 +553,7 @@ void Screen::setup()
 #else
     if (!config.display.flip_screen) {
 #if defined(ST7701_CS) || defined(ST7735_CS) || defined(ILI9341_DRIVER) || defined(ILI9342_DRIVER) || defined(ST7789_CS) ||      \
-    defined(RAK14014) || defined(HX8357_CS) || defined(ILI9488_CS)
+    defined(RAK14014) || defined(HX8357_CS) || defined(ILI9488_CS) || defined(ST7796_CS)
         static_cast<TFTDisplay *>(dispdev)->flipScreenVertically();
 #elif defined(USE_ST7789)
         static_cast<ST7789Spi *>(dispdev)->flipScreenVertically();
@@ -688,7 +695,7 @@ int32_t Screen::runOnce()
 
 #ifndef DISABLE_WELCOME_UNSET
     if (!NotificationRenderer::isOverlayBannerShowing() && config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
-        menuHandler::LoraRegionPicker(0);
+        menuHandler::OnboardMessage();
     }
 #endif
     if (!NotificationRenderer::isOverlayBannerShowing() && rebootAtMsec != 0) {
@@ -1267,40 +1274,39 @@ int Screen::handleTextMessage(const meshtastic_MeshPacket *packet)
             if (shouldWakeOnReceivedMessage()) {
                 setOn(true);    // Wake up the screen first
                 forceDisplay(); // Forces screen redraw
-
-                // === Prepare banner content ===
-                const meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(packet->from);
-                const char *longName = (node && node->has_user) ? node->user.long_name : nullptr;
-
-                const char *msgRaw = reinterpret_cast<const char *>(packet->decoded.payload.bytes);
-
-                char banner[256];
-
-                // Check for bell character in message to determine alert type
-                bool isAlert = false;
-                for (size_t i = 0; i < packet->decoded.payload.size && i < 100; i++) {
-                    if (msgRaw[i] == '\x07') {
-                        isAlert = true;
-                        break;
-                    }
-                }
-
-                if (isAlert) {
-                    if (longName && longName[0]) {
-                        snprintf(banner, sizeof(banner), "Alert Received from\n%s", longName);
-                    } else {
-                        strcpy(banner, "Alert Received");
-                    }
-                } else {
-                    if (longName && longName[0]) {
-                        snprintf(banner, sizeof(banner), "New Message from\n%s", longName);
-                    } else {
-                        strcpy(banner, "New Message");
-                    }
-                }
-
-                screen->showSimpleBanner(banner, 3000);
             }
+            // === Prepare banner content ===
+            const meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(packet->from);
+            const char *longName = (node && node->has_user) ? node->user.long_name : nullptr;
+
+            const char *msgRaw = reinterpret_cast<const char *>(packet->decoded.payload.bytes);
+
+            char banner[256];
+
+            // Check for bell character in message to determine alert type
+            bool isAlert = false;
+            for (size_t i = 0; i < packet->decoded.payload.size && i < 100; i++) {
+                if (msgRaw[i] == '\x07') {
+                    isAlert = true;
+                    break;
+                }
+            }
+
+            if (isAlert) {
+                if (longName && longName[0]) {
+                    snprintf(banner, sizeof(banner), "Alert Received from\n%s", longName);
+                } else {
+                    strcpy(banner, "Alert Received");
+                }
+            } else {
+                if (longName && longName[0]) {
+                    snprintf(banner, sizeof(banner), "New Message from\n%s", longName);
+                } else {
+                    strcpy(banner, "New Message");
+                }
+            }
+
+            screen->showSimpleBanner(banner, 3000);
         }
     }
 
