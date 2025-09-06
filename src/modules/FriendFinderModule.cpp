@@ -561,6 +561,7 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
             }
             LOG_INFO("[FriendFinder] Directed request from 0x%08x -> ACCEPT", from);
             sendFriendFinderPacket(from, meshtastic_FriendFinder_RequestType_ACCEPT);
+            sendFriendFinderPacket(from, meshtastic_FriendFinder_RequestType_NONE); // Immediately send our location
 #if HAS_SCREEN
             raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
 #endif
@@ -575,6 +576,7 @@ bool FriendFinderModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
             currentState = FriendFinderState::TRACKING_TARGET;
             activateHighGpsMode();
             pairingWindowOpen = false;
+            sendFriendFinderPacket(from, meshtastic_FriendFinder_RequestType_NONE); // Immediately send our location
             raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
             return true;
         }
@@ -846,13 +848,13 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
 {
     d->setFont(FONT_SMALL);
     char nameBuf[24];
-    char distBuf[16], agoBuf[16], batBuf[16], satsBuf[16];
+    char distBuf[16], agoBuf[16], batBuf[16];
 
     truncName(peerName, nameBuf, sizeof(nameBuf), 12);
 
     bool havePeerPos = (peerData.latitude_i != 0 || peerData.longitude_i != 0);
     bool haveBoth = haveFix && havePeerPos;
-    float bearingDeg = 0; // Still needed for arrow calculation
+    float bearingDeg = 0;
     if (haveBoth) {
         GeoCoord me(myLat, myLon, 0);
         GeoCoord fr(peerData.latitude_i, peerData.longitude_i, 0);
@@ -879,8 +881,7 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
         previousDistance = -1.0f;
     }
 
-    snprintf(batBuf, sizeof(batBuf), "%u%% Bat", (unsigned)peerData.battery_level);
-    snprintf(satsBuf, sizeof(satsBuf), "%u Sats", (unsigned)peerData.sats_in_view);
+    snprintf(batBuf, sizeof(batBuf), "%u%% ", (unsigned)peerData.battery_level);
 
     if (lastFriendPacketTime == 0) {
         strlcpy(agoBuf, "Waiting...", sizeof(agoBuf));
@@ -896,7 +897,7 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
     d->setTextAlignment(TEXT_ALIGN_CENTER);
     d->drawString(x + W / 2, y, titleBuf);
 
-    const int footerH = FONT_HEIGHT_SMALL * 2;
+    const int footerH = FONT_HEIGHT_SMALL;
     const int contentH = H - headerH - footerH;
 
     const int cy = y + headerH + (contentH / 2) + 3;
@@ -909,7 +910,7 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
         float arrowTheta = (bearingDeg * PI / 180.0f);
         if (config.display.compass_north_top == false) arrowTheta -= headingRad;
 
-        const float arrowSize = (float)contentH;
+        const float arrowSize = (float)contentH * 0.9f;
         const float arrowWidth = arrowSize * 0.4f;
 
         float p1x = 0;                    float p1y = -arrowSize / 2.0f;
@@ -927,49 +928,41 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
                         cx + r_p2x, cy + r_p2y,
                         cx + r_p3x, cy + r_p3y);
 
-    } else if (haveBoth) { // Have position, but NO magnetometer/heading
-        d->setTextAlignment(TEXT_ALIGN_CENTER);
-        d->setFont(FONT_LARGE);
-        d->drawString(cx, cy - (FONT_HEIGHT_LARGE / 2), distBuf);
-    }
-    else { // No peer position
-        d->setTextAlignment(TEXT_ALIGN_CENTER);
-        d->setFont(FONT_LARGE);
-        d->drawString(cx, cy - (FONT_HEIGHT_LARGE / 2), "?");
-    }
-
-    // --- Footer ---
-    if (haveBoth && haveHeading) {
-        // Full footer when arrow is shown
-        const int footerY1 = y + H - (FONT_HEIGHT_SMALL * 2);
-        const int footerY2 = y + H - FONT_HEIGHT_SMALL;
-        d->setFont(FONT_SMALL);
-
-        // Top row: Sats and Age
-        d->setTextAlignment(TEXT_ALIGN_LEFT);
-        d->drawString(x + 2, footerY1, satsBuf);
-        d->setTextAlignment(TEXT_ALIGN_RIGHT);
-        d->drawString(x + W - 2, footerY1, agoBuf);
-
-        // Bottom row: Distance and Battery
-        d->setTextAlignment(TEXT_ALIGN_LEFT);
-        d->drawString(x + 2, footerY2, distBuf);
-        d->setTextAlignment(TEXT_ALIGN_RIGHT);
-        d->drawString(x + W - 2, footerY2, batBuf);
-
     } else if (haveBoth) {
-        // Simplified footer when distance is in the middle
-        const int footerY2 = y + H - FONT_HEIGHT_SMALL;
-        d->setFont(FONT_SMALL);
-        d->setTextAlignment(TEXT_ALIGN_LEFT);
-        d->drawString(x + 2, footerY2, satsBuf);
-        d->setTextAlignment(TEXT_ALIGN_CENTER);
-        d->drawString(x + W/2, footerY2, batBuf);
-        d->setTextAlignment(TEXT_ALIGN_RIGHT);
-        d->drawString(x + W - 2, footerY2, agoBuf);
+        d->setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
+        d->setFont(FONT_LARGE);
+        d->drawString(cx, cy, distBuf);
     }
-}
+    else {
+        d->setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
+        d->setFont(FONT_SMALL);
+        
+        if (!haveFix) {
+            d->drawString(cx, cy, "Waiting for\nlocal GPS");
+        } else if (!havePeerPos) {
+            if (lastFriendPacketTime == 0) {
+                 d->drawString(cx, cy, "Waiting for\npeer data");
+            } else {
+                 d->drawString(cx, cy, "Peer has\nno GPS");
+            }
+        } else {
+            d->setFont(FONT_LARGE);
+            d->drawString(cx, cy, "?");
+        }
+    }
 
+    d->setFont(FONT_SMALL);
+    const int footerY = y + H - FONT_HEIGHT_SMALL;
+
+    d->setTextAlignment(TEXT_ALIGN_LEFT);
+    d->drawString(x + 2, footerY, distBuf);
+
+    d->setTextAlignment(TEXT_ALIGN_CENTER);
+    d->drawString(x + W / 2, footerY, batBuf);
+
+    d->setTextAlignment(TEXT_ALIGN_RIGHT);
+    d->drawString(x + W - 2, footerY, agoBuf);
+}
 void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {
     const int16_t W = display->getWidth();

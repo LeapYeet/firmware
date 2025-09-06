@@ -1163,29 +1163,51 @@ void menuHandler::keyVerificationFinalPrompt()
 
 void menuHandler::friendFinderBaseMenu()
 {
-    static const char *optionsArray[] = {"Back", "Start Pairing", "Track a Friend", "Friend Map", "Compass Cal"};
-    enum options { Back, Pairing, Track, Map, Calibrate };
+    static std::vector<std::string> options;
+    static std::vector<const char *> pointers;
+    options.clear();
+    pointers.clear();
+
+    options.push_back("Back");
+    options.push_back("Start Pairing");
+    options.push_back("Track a Friend");
+    options.push_back("Friend Map");
+    options.push_back("Compass Cal");
+
+    if (friendFinderModule) {
+        if (friendFinderModule->forceNoMagnetometerView) {
+            options.push_back("Mag Sim: ON");
+        } else {
+            options.push_back("Mag Sim: OFF");
+        }
+    }
+
+    for(const auto& option : options) {
+        pointers.push_back(option.c_str());
+    }
+
     BannerOverlayOptions bannerOptions;
     bannerOptions.message = "Friend Finder";
-    bannerOptions.optionsArrayPtr = optionsArray;
-    bannerOptions.optionsCount = 5;
+    bannerOptions.optionsArrayPtr = pointers.data();
+    bannerOptions.optionsCount = pointers.size();
     bannerOptions.bannerCallback = [](int selected) -> void {
-        if (selected == Back) {
-            if (friendFinderModule) friendFinderModule->setState(FriendFinderState::IDLE);
-        } else if (selected == Pairing) {
-            if (friendFinderModule) friendFinderModule->beginPairing();
-        } else if (selected == Track) {
+        if (selected == 0) { if (friendFinderModule) friendFinderModule->setState(FriendFinderState::IDLE);
+        } else if (selected == 1) { if (friendFinderModule) friendFinderModule->beginPairing();
+        } else if (selected == 2) {
             if (friendFinderModule && friendFinderModule->getUsedFriendsCount() > 0) {
                 menuQueue = friend_finder_list_menu;
                 screen->runNow();
             } else {
                 screen->showSimpleBanner("No friends saved", 1200);
             }
-        } else if (selected == Map) {
-            if (friendFinderModule) friendFinderModule->setState(FriendFinderState::FRIEND_MAP);
-        } else if (selected == Calibrate) {
-            menuQueue = friend_finder_cal_menu;
-            screen->runNow();
+        } else if (selected == 3) { if (friendFinderModule) friendFinderModule->setState(FriendFinderState::FRIEND_MAP);
+        } else if (selected == 4) { menuQueue = friend_finder_cal_menu; screen->runNow();
+        } else if (selected == 5) {
+            if (friendFinderModule) {
+                friendFinderModule->forceNoMagnetometerView = !friendFinderModule->forceNoMagnetometerView;
+                menuQueue = friend_finder_base_menu;
+                screen->runNow();
+            }
         }
     };
     screen->showOverlayBanner(bannerOptions);
