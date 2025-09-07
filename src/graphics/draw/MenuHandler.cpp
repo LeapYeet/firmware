@@ -17,15 +17,20 @@
 
 #include "modules/TraceRouteModule.h"
 #include "modules/FriendFinderModule.h" 
+#include "modules/MagnetometerModule.h"
 
 extern uint16_t TFT_MESH;
 extern FriendFinderModule* friendFinderModule;
+extern MagnetometerModule* magnetometerModule;
 
 namespace graphics
 {
 menuHandler::screenMenus menuHandler::menuQueue = menu_none;
 bool test_enabled = false;
 uint8_t test_count = 0;
+
+// Static variable to hold context for Friend Finder action menus
+static int selectedFriendListIndex = 0;
 
 void menuHandler::OnboardMessage()
 {
@@ -334,7 +339,6 @@ void menuHandler::messageResponseMenu()
 
 void menuHandler::homeBaseMenu()
 {
-    // 1. Add your new option to the enum
     enum optionsNumbers { Back, Backlight, Position, Preset, Freetext, FriendFinder, Bluetooth, Sleep, enumEnd };
 
     static const char *optionsArray[enumEnd] = {"Back"};
@@ -358,7 +362,6 @@ void menuHandler::homeBaseMenu()
         optionsEnumArray[options++] = Freetext;
     }
     
-    // 2. Add your "Friend Finder" to the options arrays
     optionsArray[options] = "Friend Finder";
     optionsEnumArray[options++] = FriendFinder;
 
@@ -401,10 +404,9 @@ void menuHandler::homeBaseMenu()
         } else if (selected == Freetext) {
             cannedMessageModule->LaunchFreetextWithDestination(NODENUM_BROADCAST);
         } 
-        // 3. Add the logic to handle your selection
         else if (selected == FriendFinder) {
-            LOG_DEBUG("Launch Friend Finder");
-            friendFinderModule->launchMenu();
+            menuQueue = friend_finder_base_menu;
+            screen->runNow();
         } else if (selected == Bluetooth) {
             menuQueue = bluetooth_toggle_menu;
             screen->runNow();
@@ -1159,6 +1161,235 @@ void menuHandler::keyVerificationFinalPrompt()
     }
 }
 
+void menuHandler::friendFinderBaseMenu()
+{
+    static std::vector<std::string> options;
+    static std::vector<const char *> pointers;
+    options.clear();
+    pointers.clear();
+
+    options.push_back("Back");
+    options.push_back("Start Pairing");
+    options.push_back("Track a Friend");
+    options.push_back("Friend Map");
+    options.push_back("Compass Cal");
+
+    if (friendFinderModule) {
+        if (friendFinderModule->forceNoMagnetometerView) {
+            options.push_back("Mag Sim: ON");
+        } else {
+            options.push_back("Mag Sim: OFF");
+        }
+    }
+
+    for(const auto& option : options) {
+        pointers.push_back(option.c_str());
+    }
+
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Friend Finder";
+    bannerOptions.optionsArrayPtr = pointers.data();
+    bannerOptions.optionsCount = pointers.size();
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == 0) { if (friendFinderModule) friendFinderModule->setState(FriendFinderState::IDLE);
+        } else if (selected == 1) { if (friendFinderModule) friendFinderModule->beginPairing();
+        } else if (selected == 2) {
+            if (friendFinderModule && friendFinderModule->getUsedFriendsCount() > 0) {
+                menuQueue = friend_finder_list_menu;
+                screen->runNow();
+            } else {
+                screen->showSimpleBanner("No friends saved", 1200);
+            }
+        } else if (selected == 3) { if (friendFinderModule) friendFinderModule->setState(FriendFinderState::FRIEND_MAP);
+        } else if (selected == 4) { menuQueue = friend_finder_cal_menu; screen->runNow();
+        } else if (selected == 5) {
+            if (friendFinderModule) {
+                friendFinderModule->forceNoMagnetometerView = !friendFinderModule->forceNoMagnetometerView;
+                menuQueue = friend_finder_base_menu;
+                screen->runNow();
+            }
+        }
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::friendFinderListMenu()
+{
+    if (!friendFinderModule) return;
+
+    static std::vector<std::string> names;
+    static std::vector<const char *> pointers;
+    names.clear();
+    pointers.clear();
+
+    names.push_back("Back");
+
+    for (int i = 0; i < FriendFinderModule::MAX_FRIENDS; ++i) {
+        const auto& f = friendFinderModule->getFriendRecord(i);
+        if (f.used) {
+            names.push_back(friendFinderModule->getNodeName(f.node));
+        }
+    }
+
+    for(const auto& name : names) {
+        pointers.push_back(name.c_str());
+    }
+
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Track a Friend";
+    bannerOptions.optionsArrayPtr = pointers.data();
+    bannerOptions.optionsCount = pointers.size();
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == 0) { // Back
+            menuQueue = friend_finder_base_menu;
+            screen->runNow();
+        } else {
+            selectedFriendListIndex = selected; // Store the 1-based list index
+            menuQueue = friend_finder_list_action_menu;
+            screen->runNow();
+        }
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::friendFinderListActionMenu()
+{
+    if (!friendFinderModule || selectedFriendListIndex == 0) return;
+    
+    const auto* rec = friendFinderModule->getFriendByListIndex(selectedFriendListIndex);
+    if (!rec) return;
+
+    static const char *optionsArray[] = {"Back", "Track", "Remove"};
+    BannerOverlayOptions bannerOptions;
+    
+    static char message[48];
+    snprintf(message, sizeof(message), "Friend: %s", friendFinderModule->getShortName(rec->node));
+    bannerOptions.message = message;
+
+    bannerOptions.optionsArrayPtr = optionsArray;
+    bannerOptions.optionsCount = 3;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == 0) { // Back
+            menuQueue = friend_finder_list_menu;
+            screen->runNow();
+        } else if (selected == 1) { // Track
+            const auto* friendRec = friendFinderModule->getFriendByListIndex(selectedFriendListIndex);
+            if(friendRec) friendFinderModule->requestMutualTracking(friendRec->node);
+        } else if (selected == 2) { // Remove
+            friendFinderModule->removeFriendByListIndex(selectedFriendListIndex);
+            if (friendFinderModule->getUsedFriendsCount() > 0) {
+                 menuQueue = friend_finder_list_menu; // Refresh list
+            } else {
+                menuQueue = friend_finder_base_menu; // No friends left
+            }
+            screen->runNow();
+        }
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::friendFinderCalMenu()
+{
+    static const char *optionsArray[] = {"Back", "Figure-8 Cal", "Flat-Spin Cal", "Set North Here", "Clear North", "Dump Cal"};
+    enum options { Back, Fig8, Flat, SetNorth, ClearNorth, Dump };
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Compass Calibration";
+    bannerOptions.optionsArrayPtr = optionsArray;
+    bannerOptions.optionsCount = 6;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == Back) {
+            menuQueue = friend_finder_base_menu;
+            screen->runNow();
+        } else if (magnetometerModule) {
+            if (selected == Fig8) {
+                magnetometerModule->startFigure8Calibration(15000);
+                screen->showSimpleBanner("Move in a FIGURE-8 for 15s", 1800);
+            } else if (selected == Flat) {
+                magnetometerModule->startFlatSpinCalibration(12000);
+                screen->showSimpleBanner("Spin on table CLOCKWISE for 12s", 1600);
+            } else if (selected == SetNorth) {
+                if(magnetometerModule->hasHeading()) {
+                    magnetometerModule->setNorthHere();
+                    screen->showSimpleBanner("North set to current heading", 1200);
+                } else {
+                     screen->showSimpleBanner("Heading not ready", 800);
+                }
+            } else if (selected == ClearNorth) {
+                magnetometerModule->clearNorthOffset();
+                screen->showSimpleBanner("North offset cleared", 1000);
+            } else if (selected == Dump) {
+                magnetometerModule->dumpCalToLog();
+                screen->showSimpleBanner("Cal dumped to log", 1000);
+            }
+        } else if (selected != Back) {
+            screen->showSimpleBanner("No magnetometer", 1200);
+        }
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::friendFinderSessionMenu()
+{
+    static const char *optionsArray[] = {"Back", "Stop Tracking", "Toggle Mag View"};
+    enum options { Back, Stop, ToggleView };
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Session Menu";
+    bannerOptions.optionsArrayPtr = optionsArray;
+    bannerOptions.optionsCount = 3;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == Stop) { // Stop Tracking
+            if (friendFinderModule) friendFinderModule->endSession(true);
+        } else if (selected == ToggleView) { // Toggle test view
+            if (friendFinderModule) {
+                friendFinderModule->forceNoMagnetometerView = !friendFinderModule->forceNoMagnetometerView;
+            }
+        }
+        // If "Back" or "Toggle" is selected, the banner closes and the screen redraws.
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::friendFinderMapMenu()
+{
+    static const char *optionsArray[] = {"Back to Map", "Toggle Names", "Exit Map"};
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Map Menu";
+    bannerOptions.optionsArrayPtr = optionsArray;
+    bannerOptions.optionsCount = 3;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == 1) { // Toggle Names
+            if (friendFinderModule) friendFinderModule->friendMapNamesVisible = !friendFinderModule->friendMapNamesVisible;
+        } else if (selected == 2) { // Exit Map
+            if (friendFinderModule) {
+                 menuQueue = friend_finder_base_menu;
+                 friendFinderModule->setState(FriendFinderState::IDLE); // Make sure we leave map state
+                 screen->runNow();
+            }
+        }
+        // If "Back" is selected, the banner just closes, returning to the map.
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::friendFinderPairingMenu()
+{
+    static const char *optionsArray[] = {"Back", "Cancel Pairing"};
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Pairing Menu";
+    bannerOptions.optionsArrayPtr = optionsArray;
+    bannerOptions.optionsCount = 2;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == 1) { // Cancel Pairing
+            if (friendFinderModule) {
+                // friendFinderModule->cancelPairing();
+            }
+        }
+        // If "Back" is selected, the banner just closes.
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
+
 void menuHandler::handleMenuSwitch(OLEDDisplay *display)
 {
     if (menuQueue != menu_none)
@@ -1257,6 +1488,28 @@ void menuHandler::handleMenuSwitch(OLEDDisplay *display)
         break;
     case throttle_message:
         screen->showSimpleBanner("Too Many Attempts\nTry again in 60 seconds.", 5000);
+        break;
+    // --- Friend Finder Menus ---
+    case friend_finder_base_menu:
+        friendFinderBaseMenu();
+        break;
+    case friend_finder_list_menu:
+        friendFinderListMenu();
+        break;
+    case friend_finder_list_action_menu:
+        friendFinderListActionMenu();
+        break;
+    case friend_finder_cal_menu:
+        friendFinderCalMenu();
+        break;
+    case friend_finder_session_menu:
+        friendFinderSessionMenu();
+        break;
+    case friend_finder_map_menu:
+        friendFinderMapMenu();
+        break;
+    case friend_finder_pairing_menu:
+        friendFinderPairingMenu();
         break;
     }
     menuQueue = menu_none;
