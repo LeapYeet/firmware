@@ -46,6 +46,39 @@ static const char* ffTypeName(meshtastic_FriendFinder_RequestType t) {
     }
 }
 
+static void calculateDestination(int32_t lat1_i, int32_t lon1_i, float bearing, float distance,
+                                 int32_t &lat2_i, int32_t &lon2_i)
+{
+    const double R = 6371000.0; // Earth's radius in meters
+    const double lat1_rad = (double)lat1_i / 10000000.0 * M_PI / 180.0;
+    const double lon1_rad = (double)lon1_i / 10000000.0 * M_PI / 180.0;
+    const double brng_rad = (double)bearing * M_PI / 180.0;
+
+    // Use Equirectangular approximation - simpler and more consistent with simple bearing calculations
+    double lat2_rad = lat1_rad + (distance * cos(brng_rad)) / R;
+    double lon2_rad = lon1_rad + (distance * sin(brng_rad)) / (R * cos(lat1_rad));
+
+    lat2_i = (int32_t)(lat2_rad * 180.0 / M_PI * 10000000.0);
+    lon2_i = (int32_t)(lon2_rad * 180.0 / M_PI * 10000000.0);
+}
+
+static float initialBearingDeg(int32_t lat1_i, int32_t lon1_i,
+                               int32_t lat2_i, int32_t lon2_i)
+{
+    // Convert from 1e-7 deg fixed to radians
+    const double lat1 = (double)lat1_i / 10000000.0 * M_PI / 180.0;
+    const double lat2 = (double)lat2_i / 10000000.0 * M_PI / 180.0;
+    const double dLon = ((double)lon2_i - (double)lon1_i) / 10000000.0 * M_PI / 180.0;
+
+    const double y = sin(dLon) * cos(lat2);
+    const double x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon);
+
+    double deg = atan2(y, x) * 180.0 / M_PI; // -180..+180, where 0=N
+    if (deg < 0) deg += 360.0;
+    return (float)deg;
+}
+
+
 static void hexdump(const char *tag, const uint8_t *b, size_t n)
 {
     constexpr size_t W = 16;
@@ -361,6 +394,21 @@ void FriendFinderModule::startTracking(uint32_t nodeNum)
     }
 }
 
+void FriendFinderModule::startSpoofedTracking(int direction)
+{
+    if (!gpsStatus->getHasLock()) {
+        screen->showSimpleBanner("Waiting for GPS lock...", 1500);
+        return;
+    }
+
+    LOG_INFO("[FriendFinder] Starting spoofed tracking session, direction=%d", direction);
+    spoofedDirection = direction;
+    currentState = FriendFinderState::TRACKING_SPOOFED_TARGET;
+    previousDistance = -1.0f; // Reset distance trend
+    activateHighGpsMode();
+    raiseUIEvent(UIFrameEvent::Action::REGENERATE_FRAMESET, true);
+}
+
 void FriendFinderModule::endSession(bool notifyPeer)
 {
     if (notifyPeer && targetNodeNum) {
@@ -400,6 +448,26 @@ int FriendFinderModule::handleInputEvent(const InputEvent *ev)
         return 0;
     }
 
+    if (currentState == FriendFinderState::COMPASS_SCREEN) {
+        // Don't allow menu to pop up while a calibration is running
+        if (magnetometerModule && (magnetometerModule->isCalibrating() || magnetometerModule->isFlatCalibrating())) {
+            return 0; // Ignore input during calibration
+        }
+
+        if (isSelect) {
+            graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_cal_menu;
+            screen->runNow();
+            return 1;
+        }
+        if (isBack) {
+            setState(FriendFinderState::IDLE);
+            graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_base_menu;
+            screen->runNow();
+            return 1;
+        }
+        return 0;
+    }
+
     if (currentState == FriendFinderState::FRIEND_MAP) {
         if (isSelect) {
             graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_map_menu;
@@ -413,17 +481,22 @@ int FriendFinderModule::handleInputEvent(const InputEvent *ev)
         return 0;
     }
 
-    if (currentState == FriendFinderState::TRACKING_TARGET ||
-        currentState == FriendFinderState::BEING_TRACKED)
+   if (currentState == FriendFinderState::TRACKING_TARGET ||
+        currentState == FriendFinderState::BEING_TRACKED ||
+        currentState == FriendFinderState::TRACKING_SPOOFED_TARGET)
     {
         if (isSelect) {
-            previousState = currentState;
-            graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_session_menu;
+            if (currentState == FriendFinderState::TRACKING_SPOOFED_TARGET) {
+                graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_spoof_session_menu;
+            } else {
+                previousState = currentState;
+                graphics::menuHandler::menuQueue = graphics::menuHandler::friend_finder_session_menu;
+            }
             screen->runNow();
             return 1;
         }
         if (isBack) {
-            endSession(true);
+            endSession(currentState != FriendFinderState::TRACKING_SPOOFED_TARGET);
             return 1;
         }
         return 0;
@@ -481,7 +554,6 @@ int32_t FriendFinderModule::runOnce()
         const bool calNow = magnetometerModule->isCalibrating();
         if (calNow && !calWasActive) {
             calWasActive = true;
-            screen->showSimpleBanner("Move in FIGURE-8", 15000);
         }
         if (!calNow && calWasActive) {
             calWasActive = false;
@@ -491,7 +563,6 @@ int32_t FriendFinderModule::runOnce()
         const bool flatNow = magnetometerModule->isFlatCalibrating();
         if (flatNow && !flatCalWasActive) {
             flatCalWasActive = true;
-            screen->showSimpleBanner("Spin device CLOCKWISE", 15000);
         }
         if (!flatNow && flatCalWasActive) {
             flatCalWasActive = false;
@@ -501,6 +572,12 @@ int32_t FriendFinderModule::runOnce()
 #endif
 
     switch (currentState) {
+    case FriendFinderState::COMPASS_SCREEN:
+    case FriendFinderState::TRACKING_SPOOFED_TARGET:
+#if HAS_SCREEN
+        if (shouldDraw()) raiseUIEvent(UIFrameEvent::Action::REDRAW_ONLY);
+#endif
+        break;
     case FriendFinderState::BEING_TRACKED:
         if ((now - lastSentPacketTime) > UPDATE_INTERVAL * 1000UL && targetNodeNum) {
             sendFriendFinderPacket(targetNodeNum, meshtastic_FriendFinder_RequestType_NONE);
@@ -754,6 +831,88 @@ void FriendFinderModule::raiseUIEvent(UIFrameEvent::Action a, bool focus)
 
 #if HAS_SCREEN
 
+void FriendFinderModule::drawSimpleCompass(OLEDDisplay *d, int16_t x, int16_t y, int W, int H)
+{
+    d->setTextAlignment(TEXT_ALIGN_CENTER);
+
+    // Title
+    d->setFont(FONT_SMALL);
+    d->drawString(x + W / 2, y, "Compass");
+
+    if (!magnetometerModule || !magnetometerModule->hasHeading()) {
+        d->setFont(FONT_SMALL);
+        d->setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
+        d->drawString(x + W / 2, y + H / 2, "Magnetometer\nnot detected.");
+        return;
+    }
+
+    float heading = magnetometerModule->getHeading();
+
+    // Draw heading in degrees (large font)
+    d->setFont(FONT_LARGE);
+    char headingBuf[10];
+    snprintf(headingBuf, sizeof(headingBuf), "%.0f\xC2\xB0", heading);
+    d->drawString(x + W / 2, y + H / 2 - FONT_HEIGHT_LARGE / 2, headingBuf);
+
+    // Determine cardinal direction
+    const char *direction = "---";
+    if (heading >= 337.5 || heading < 22.5)   direction = "N";
+    else if (heading >= 22.5  && heading < 67.5)  direction = "NE";
+    else if (heading >= 67.5  && heading < 112.5) direction = "E";
+    else if (heading >= 112.5 && heading < 157.5) direction = "SE";
+    else if (heading >= 157.5 && heading < 202.5) direction = "S";
+    else if (heading >= 202.5 && heading < 247.5) direction = "SW";
+    else if (heading >= 247.5 && heading < 292.5) direction = "W";
+    else if (heading >= 292.5 && heading < 337.5) direction = "NW";
+
+    d->setFont(FONT_MEDIUM);
+    d->drawString(x + W / 2, y + H / 2 + FONT_HEIGHT_LARGE / 2, direction);
+
+    d->setFont(FONT_SMALL);
+    d->setTextAlignment(TEXT_ALIGN_CENTER);
+    d->drawString(x+W/2, y + H - FONT_HEIGHT_SMALL, "");
+}
+
+void FriendFinderModule::drawFigure8Cal(OLEDDisplay *d, int16_t x, int16_t y, int W, int H) {
+    d->setTextAlignment(TEXT_ALIGN_CENTER);
+    d->setFont(FONT_SMALL);
+    d->drawString(x + W / 2, y, "");
+
+    // Countdown Timer
+    uint32_t remainingMs = 15000 * (100 - magnetometerModule->getCalibrationPercent()) / 100;
+    char timeBuf[10];
+    snprintf(timeBuf, sizeof(timeBuf), "%.1fs", (float)remainingMs / 1000.0f);
+    d->setFont(FONT_LARGE);
+    d->drawString(x + W / 2, y + H/2 - FONT_HEIGHT_LARGE, timeBuf);
+
+    // Instructions
+    d->setFont(FONT_SMALL);
+    d->setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
+    d->drawString(x+W/2, y+H/2 + FONT_HEIGHT_SMALL, "Move device in a\nwide figure-8 pattern");
+}
+
+void FriendFinderModule::drawFlatSpinCal(OLEDDisplay *d, int16_t x, int16_t y, int W, int H) {
+    // Title at the top
+    d->setTextAlignment(TEXT_ALIGN_CENTER);
+    d->setFont(FONT_SMALL);
+    d->drawString(x + W / 2, y, "");
+
+    // Countdown Timer in the center
+    uint32_t remainingMs = 12000 * (100 - magnetometerModule->getFlatCalPercent()) / 100;
+    char timeBuf[10];
+    snprintf(timeBuf, sizeof(timeBuf), "%.1fs", (float)remainingMs / 1000.0f);
+    
+    d->setFont(FONT_LARGE);
+    d->setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
+    d->drawString(x + W / 2, y + H / 2, timeBuf);
+
+    // Instructions at the bottom
+    d->setFont(FONT_SMALL);
+    d->setTextAlignment(TEXT_ALIGN_CENTER);
+    d->drawString(x + W / 2, y + H - FONT_HEIGHT_SMALL, "Spin CLOCKWISE on\na flat surface");
+}
+
+
 void FriendFinderModule::drawFriendMap(OLEDDisplay *d, int16_t x, int16_t y, int W, int H)
 {
     d->setFont(FONT_SMALL);
@@ -859,7 +1018,7 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
         GeoCoord me(myLat, myLon, 0);
         GeoCoord fr(peerData.latitude_i, peerData.longitude_i, 0);
         float currentDistance = me.distanceTo(fr);
-        bearingDeg = me.bearingTo(fr) * 180 / PI; if (bearingDeg < 0) bearingDeg += 360;
+        bearingDeg = initialBearingDeg(myLat, myLon, peerData.latitude_i, peerData.longitude_i);
 
         char trendIndicator[3] = " ";
         if(previousDistance >= 0.0f) {
@@ -906,27 +1065,51 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
     const bool haveHeading = (magnetometerModule && magnetometerModule->hasHeading()) && !forceNoMagnetometerView;
 
     if (haveBoth && haveHeading) {
-        const float headingRad = magnetometerModule->getHeading() * M_PI / 180.0f;
-        float arrowTheta = (bearingDeg * PI / 180.0f);
-        if (config.display.compass_north_top == false) arrowTheta -= headingRad;
+        const float heading = magnetometerModule->getHeading();
+        const float headingRad = heading * M_PI / 180.0f;
+        float relativeBearingRad = (bearingDeg * M_PI / 180.0f);
+        if (config.display.compass_north_top == false) relativeBearingRad -= headingRad;
 
-        const float arrowSize = (float)contentH * 0.9f;
-        const float arrowWidth = arrowSize * 0.4f;
+        // ***** START: Added Debug Logging *****
+        const uint32_t now = millis();
+        if (now - lastDebugLogMs > 2000) { // Log every 2 seconds
+            lastDebugLogMs = now;
+            float finalArrowAngle = fmod(relativeBearingRad * 180.0f / M_PI, 360.0f);
+            if (finalArrowAngle < 0) finalArrowAngle += 360.0f;
 
-        float p1x = 0;                    float p1y = -arrowSize / 2.0f;
-        float p2x = -arrowWidth / 2.0f;   float p2y = arrowSize / 2.0f;
-        float p3x = arrowWidth / 2.0f;    float p3y = arrowSize / 2.0f;
+            LOG_INFO("[FF_DEBUG] Me(%.4f, %.4f) Peer(%.4f, %.4f) | Bearing: %.1f, Heading: %.1f, Arrow: %.1f",
+                     (float)myLat / 10000000.0f,
+                     (float)myLon / 10000000.0f,
+                     (float)peerData.latitude_i / 10000000.0f,
+                     (float)peerData.longitude_i / 10000000.0f,
+                     bearingDeg,
+                     heading,
+                     finalArrowAngle);
+        }
+        // ***** END: Added Debug Logging *****
 
-        float cos_a = cosf(arrowTheta);
-        float sin_a = sinf(arrowTheta);
+        const float arrowSize = (float)contentH * 0.45f;
+        const float arrowWidth = arrowSize * 0.5f;
 
-        int16_t r_p1x = p1x * cos_a - p1y * sin_a; int16_t r_p1y = p1x * sin_a + p1y * cos_a;
-        int16_t r_p2x = p2x * cos_a - p2y * sin_a; int16_t r_p2y = p2x * sin_a + p2y * cos_a;
-        int16_t r_p3x = p3x * cos_a - p3y * sin_a; int16_t r_p3y = p3x * sin_a + p3y * cos_a;
+        // Use correct trig for geographic bearings (0=N) and screen coordinates (+y is down)
+        const float sin_a = sinf(relativeBearingRad);
+        const float cos_a = cosf(relativeBearingRad);
 
-        d->fillTriangle(cx + r_p1x, cy + r_p1y,
-                        cx + r_p2x, cy + r_p2y,
-                        cx + r_p3x, cy + r_p3y);
+        // Tip of the arrow
+        int16_t p1x = cx + arrowSize * sin_a;
+        int16_t p1y = cy - arrowSize * cos_a;
+
+        // Base of the arrow (center point)
+        int16_t baseX = cx - (arrowSize * 0.8f) * sin_a;
+        int16_t baseY = cy + (arrowSize * 0.8f) * cos_a;
+
+        // Left and right corners of the arrowhead, perpendicular to the arrow direction
+        int16_t p2x = baseX + arrowWidth * cos_a;
+        int16_t p2y = baseY + arrowWidth * sin_a;
+        int16_t p3x = baseX - arrowWidth * cos_a;
+        int16_t p3y = baseY - arrowWidth * sin_a;
+
+        d->fillTriangle(p1x, p1y, p2x, p2y, p3x, p3y);
 
     } else if (haveBoth) {
         d->setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
@@ -963,10 +1146,64 @@ void FriendFinderModule::drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, i
     d->setTextAlignment(TEXT_ALIGN_RIGHT);
     d->drawString(x + W - 2, footerY, agoBuf);
 }
+
+
 void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {
     const int16_t W = display->getWidth();
     const int16_t H = display->getHeight();
+
+    if (currentState == FriendFinderState::TRACKING_SPOOFED_TARGET) {
+        if (!gpsStatus->getHasLock()) {
+            display->setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
+            display->setFont(FONT_SMALL);
+            display->drawString(x + W / 2, y + H / 2, "Spoof Test:\nWaiting for local GPS...");
+            return;
+        }
+
+        // 1. Get our current position
+        const int32_t myLat = gpsStatus->getLatitude();
+        const int32_t myLon = gpsStatus->getLongitude();
+
+        // 2. Calculate the fake peer's position
+        const char* peerName = "Error";
+        float bearing = 0.0f;
+        switch(spoofedDirection) {
+            case 0: peerName = "North Target"; bearing = 0.0f; break;
+            case 1: peerName = "East Target"; bearing = 90.0f; break;
+            case 2: peerName = "South Target"; bearing = 180.0f; break;
+            case 3: peerName = "West Target"; bearing = 270.0f; break;
+        }
+        int32_t peerLat, peerLon;
+        calculateDestination(myLat, myLon, bearing, 1000.0, peerLat, peerLon); // Use the new helper
+
+        // 3. Create fake peer data
+        meshtastic_FriendFinder fakePeerData = meshtastic_FriendFinder_init_default;
+        fakePeerData.latitude_i = peerLat;
+        fakePeerData.longitude_i = peerLon;
+        fakePeerData.battery_level = 100;
+
+        // 4. Call the standard drawing function with our fake data
+        this->drawSessionPage(display, x, y, W, H, peerName, fakePeerData,
+                        true, myLat, myLon, 1, millis());
+        return;
+    }
+
+    if (currentState == FriendFinderState::COMPASS_SCREEN) {
+        if (magnetometerModule) {
+            if (magnetometerModule->isFlatCalibrating()) {
+                drawFlatSpinCal(display, x, y, W, H);
+            } else if (magnetometerModule->isCalibrating()) {
+                drawFigure8Cal(display, x, y, W, H);
+            } else {
+                drawSimpleCompass(display, x, y, W, H);
+            }
+        } else {
+            // Fallback if no magnetometer
+            drawSimpleCompass(display, x, y, W, H);
+        }
+        return;
+    }
 
     if (currentState == FriendFinderState::PAIRING_DISCOVERY ||
         currentState == FriendFinderState::AWAITING_CONFIRMATION ||
@@ -1030,6 +1267,7 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
                         haveFix, myLat, myLon, ageSec, this->lastFriendPacketTime);
     }
 }
+
 #endif
 
 bool FriendFinderModule::shouldDraw()
@@ -1040,5 +1278,7 @@ bool FriendFinderModule::shouldDraw()
            currentState == FriendFinderState::FRIEND_MAP ||
            currentState == FriendFinderState::PAIRING_DISCOVERY || 
            currentState == FriendFinderState::AWAITING_CONFIRMATION ||
-           currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE;
+           currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE ||
+           currentState == FriendFinderState::COMPASS_SCREEN ||
+           currentState == FriendFinderState::TRACKING_SPOOFED_TARGET;
 }

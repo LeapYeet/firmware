@@ -64,8 +64,15 @@ public:
     void    setNorthHere();     // Treat current heading as 0°
     void    clearNorthOffset(); // Clear any user north offset
 
+    // Clear all calibration (figure-8, flat-spin, north)
+    void    clearAllCalibration();
+    
     // Debug dump of calibration state
     void    dumpCalToLog();
+
+    // Toggles the 180-degree heading flip
+    void    toggleFlipNorth();  
+    bool    isNorthFlipped() const;
 
 private:
     // ---------- Runtime state ----------
@@ -145,11 +152,16 @@ private:
     void applyCal(int16_t rx, int16_t ry, int16_t rz, float &fx, float &fy, float &fz);
     void applySoftIron2D(float &fx, float &fy); // in-place on post-cal XY
 
+    // User request to flip heading 180 degrees
+    bool  flipNorth = false;
+
     // Persistent storage
     void loadPrefs();
     void saveCalPrefs();
     void saveNorthPrefs();
     void saveSoftIronPrefs();
+    void saveFlipNorthPrefs();
+
 
 #if MAGMOD_HAVE_NVS
     Preferences prefs;

@@ -46,6 +46,8 @@ class menuHandler
         friend_finder_session_menu,
         friend_finder_map_menu,
         friend_finder_pairing_menu,
+        friend_finder_spoof_session_menu,
+        friend_finder_clear_cal_confirm,
 
     };
     static screenMenus menuQueue;
@@ -91,7 +93,9 @@ class menuHandler
     static void friendFinderSessionMenu();
     static void friendFinderMapMenu();
     static void friendFinderPairingMenu();
-
+    static void friendFinderSpoofSessionMenu();
+    static void friendFinderClearCalConfirmMenu();
+    
   private:
     static void saveUIConfig();
     static void keyVerificationInitMenu();

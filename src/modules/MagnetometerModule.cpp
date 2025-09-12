@@ -395,17 +395,18 @@ int32_t MagnetometerModule::runOnce() {
                 const double a21 =  sn*invS1*cs +  cs*invS2*(-sn);   // same as a12
                 const double a22 =  sn*invS1*sn +  cs*invS2*cs;      // sn^2 * invS1 + cs^2 * invS2
 
-                // --- NEW: Check rotation direction ---
+                // --- Check rotation direction ---
                 // We asked the user to spin CLOCKWISE.
-                // In a standard right-hand coordinate system (X right, Y up), a CW rotation
-                // produces a negative sum of cross products z = x1*y2 - x2*y1.
-                // A positive sum means CCW rotation, which implies an axis is inverted.
-                if (flatSpinCrossSum > 0) {
-                    flipYafterCal = true;
-                    LOG_INFO("[Magnetometer] Flat-spin detected CCW rotation. Assuming inverted Y-axis. Enabling correction.");
-                } else if (flatSpinCrossSum < 0) {
+                // A standard right-hand coordinate system (X right, Y up) produces a
+                // negative sum of cross products for a CW rotation.
+                // The logic has been inverted from its original state to match observed hardware
+                // behavior where a CW spin required the Y-axis flip to be enabled for a correct heading.
+                if (flatSpinCrossSum > 0) { // Positive sum: CCW rotation detected.
                     flipYafterCal = false;
-                    LOG_INFO("[Magnetometer] Flat-spin detected CW rotation as expected. No axis flip correction needed.");
+                    LOG_INFO("[Magnetometer] Flat-spin detected CCW rotation. Assuming standard Y-axis. No flip correction needed.");
+                } else if (flatSpinCrossSum < 0) { // Negative sum: CW rotation detected.
+                    flipYafterCal = true;
+                    LOG_INFO("[Magnetometer] Flat-spin detected CW rotation as expected. Enabling inverted Y-axis correction.");
                 } else {
                     // No significant rotation. Leave flipYafterCal as it was.
                     LOG_WARN("[Magnetometer] Flat-spin: No significant rotation detected. Axis flip correction state unchanged.");
@@ -458,6 +459,10 @@ int32_t MagnetometerModule::runOnce() {
     // Apply user “north here” offset (so that if user pointed to true N and pressed Set North, we output ~0°)
     headingDeg = wrap360(headingDeg - userZeroDeg);
 
+    if (flipNorth) {
+        headingDeg = wrap360(headingDeg + 180.0f);
+    }
+
     // EMA smoothing in unit-vector domain to avoid wrap glitches
     {
         const float c = cosf(headingDeg * (float)M_PI / 180.0f);
@@ -485,13 +490,38 @@ int32_t MagnetometerModule::runOnce() {
 }
 
 bool MagnetometerModule::hasHeading() {
-    LOG_INFO("[Magnetometer] hasHeading() -> %s", headingIsValid ? "TRUE" : "FALSE");
+    //LOG_INFO("[Magnetometer] hasHeading() -> %s", headingIsValid ? "TRUE" : "FALSE");
     return headingIsValid;
 }
 
 float MagnetometerModule::getHeading() {
-    LOG_INFO("[Magnetometer] getHeading() -> %.2f deg (valid=%s)", headingDegrees, headingIsValid ? "TRUE" : "FALSE");
+    //LOG_INFO("[Magnetometer] getHeading() -> %.2f deg (valid=%s)", headingDegrees, headingIsValid ? "TRUE" : "FALSE");
     return headingDegrees;
+}
+
+void MagnetometerModule::clearAllCalibration() {
+    LOG_INFO("[Magnetometer] Clearing ALL calibration data.");
+
+    // Clear Figure-8 (Hard-iron) calibration
+    biasX = 0.0f; biasY = 0.0f; biasZ = 0.0f;
+    scaleX = 1.0f; scaleY = 1.0f; scaleZ = 1.0f;
+    saveCalPrefs();
+    LOG_INFO("[Magnetometer] Cleared hard-iron (figure-8) calibration.");
+
+    // Clear Flat-spin (2D Soft-iron) calibration
+    // This function also handles saving the preferences.
+    clearSoftIron2D();
+
+    // Clear "North here" offset
+    // This function also handles saving the preferences.
+    clearNorthOffset();
+
+    // Clear 180-degree heading flip
+    flipNorth = false;
+    saveFlipNorthPrefs();
+    LOG_INFO("[Magnetometer] Cleared 180-degree north flip.");
+
+    LOG_INFO("[Magnetometer] All calibration data has been reset to defaults.");
 }
 
 void MagnetometerModule::explainWhyHeadingInvalidOnce() {
@@ -588,6 +618,16 @@ void MagnetometerModule::clearSoftIron2D() {
     LOG_INFO("[Magnetometer] Cleared 2D soft-iron matrix and axis flip state.");
 }
 
+void MagnetometerModule::toggleFlipNorth() {
+    flipNorth = !flipNorth;
+    LOG_INFO("[Magnetometer] Flip North toggled to: %s", flipNorth ? "ON" : "OFF");
+    saveFlipNorthPrefs();
+}
+
+bool MagnetometerModule::isNorthFlipped() const {
+    return flipNorth;
+}
+
 /* ---------- Prefs ---------- */
 void MagnetometerModule::loadPrefs() {
 #if MAGMOD_HAVE_NVS
@@ -606,6 +646,7 @@ void MagnetometerModule::loadPrefs() {
     // 2D soft-iron
     siValid = prefs.getBool("si_ok", false);
     flipYafterCal = prefs.getBool("flip_y", false);
+    flipNorth = prefs.getBool("flip_n", false); // Add this line
     siBx    = prefs.getFloat("si_bx", 0.0f);
     siBy    = prefs.getFloat("si_by", 0.0f);
     siSxx   = prefs.getFloat("si_sxx", 1.0f);
@@ -621,6 +662,14 @@ void MagnetometerModule::loadPrefs() {
         LOG_INFO("[Magnetometer] Loaded 2D soft-iron: bx=%.2f by=%.2f S=[[%.5f %.5f][%.5f %.5f]] flipY=%d",
                  siBx, siBy, siSxx, siSxy, siSyx, siSyy, (int)flipYafterCal);
     }
+#endif
+}
+
+void MagnetometerModule::saveFlipNorthPrefs() {
+#if MAGMOD_HAVE_NVS
+    if (!prefs.begin("magmod", /*rw=*/false)) return;
+    prefs.putBool("flip_n", flipNorth);
+    prefs.end();
 #endif
 }
 

@@ -1161,6 +1161,10 @@ void menuHandler::keyVerificationFinalPrompt()
     }
 }
 
+
+
+
+
 void menuHandler::friendFinderBaseMenu()
 {
     static std::vector<std::string> options;
@@ -1171,16 +1175,17 @@ void menuHandler::friendFinderBaseMenu()
     options.push_back("Back");
     options.push_back("Start Pairing");
     options.push_back("Track a Friend");
-    options.push_back("Friend Map");
+    //options.push_back("Friend Map");
     options.push_back("Compass Cal");
 
-    if (friendFinderModule) {
-        if (friendFinderModule->forceNoMagnetometerView) {
-            options.push_back("Mag Sim: ON");
-        } else {
-            options.push_back("Mag Sim: OFF");
-        }
-    }
+    // if (friendFinderModule) {
+    //     options.push_back(std::string("Spoof Test: ") + (friendFinderModule->spoofModeEnabled ? "ON" : "OFF"));
+    //     if (friendFinderModule->forceNoMagnetometerView) {
+    //         options.push_back("Mag Sim: ON");
+    //     } else {
+    //         options.push_back("Mag Sim: OFF");
+    //     }
+    // }
 
     for(const auto& option : options) {
         pointers.push_back(option.c_str());
@@ -1191,24 +1196,41 @@ void menuHandler::friendFinderBaseMenu()
     bannerOptions.optionsArrayPtr = pointers.data();
     bannerOptions.optionsCount = pointers.size();
     bannerOptions.bannerCallback = [](int selected) -> void {
-        if (selected == 0) { if (friendFinderModule) friendFinderModule->setState(FriendFinderState::IDLE);
-        } else if (selected == 1) { if (friendFinderModule) friendFinderModule->beginPairing();
-        } else if (selected == 2) {
-            if (friendFinderModule && friendFinderModule->getUsedFriendsCount() > 0) {
-                menuQueue = friend_finder_list_menu;
-                screen->runNow();
-            } else {
-                screen->showSimpleBanner("No friends saved", 1200);
-            }
-        } else if (selected == 3) { if (friendFinderModule) friendFinderModule->setState(FriendFinderState::FRIEND_MAP);
-        } else if (selected == 4) { menuQueue = friend_finder_cal_menu; screen->runNow();
-        } else if (selected == 5) {
+        if (selected == 0) { // Back
+            if (friendFinderModule) friendFinderModule->setState(FriendFinderState::IDLE);
+        } else if (selected == 1) { // Start Pairing
+            if (friendFinderModule) friendFinderModule->beginPairing();
+        } else if (selected == 2) { // Track a Friend
             if (friendFinderModule) {
-                friendFinderModule->forceNoMagnetometerView = !friendFinderModule->forceNoMagnetometerView;
-                menuQueue = friend_finder_base_menu;
-                screen->runNow();
+                if (!friendFinderModule->spoofModeEnabled && friendFinderModule->getUsedFriendsCount() == 0) {
+                    screen->showSimpleBanner("No friends saved", 1200);
+                } else {
+                    menuQueue = friend_finder_list_menu;
+                    screen->runNow();
+                }
             }
-        }
+        } else if (selected == 3) { // Compass Cal
+            if (friendFinderModule) friendFinderModule->setState(FriendFinderState::COMPASS_SCREEN);
+        } 
+
+        // The following options are currently disabled. Friend map needs more work.
+        // Spoof test and mag sim are developer tools and not intended for general use.
+        // else if (selected == 4) { // Friend Map
+        //     if (friendFinderModule) friendFinderModule->setState(FriendFinderState::FRIEND_MAP);
+        // } else if (selected == 5) { // Spoof Test Toggle
+        //     if (friendFinderModule) {
+        //         friendFinderModule->spoofModeEnabled = !friendFinderModule->spoofModeEnabled;
+        //         menuQueue = friend_finder_base_menu; // Refresh menu
+        //         screen->runNow();
+        //     }
+        // } else if (selected == 6) { // Mag Sim Toggle
+        //     if (friendFinderModule) {
+        //         friendFinderModule->forceNoMagnetometerView = !friendFinderModule->forceNoMagnetometerView;
+        //         menuQueue = friend_finder_base_menu; // Refresh menu
+        //         screen->runNow();
+        //     }
+        // }
+
     };
     screen->showOverlayBanner(bannerOptions);
 }
@@ -1222,32 +1244,79 @@ void menuHandler::friendFinderListMenu()
     names.clear();
     pointers.clear();
 
-    names.push_back("Back");
-
-    for (int i = 0; i < FriendFinderModule::MAX_FRIENDS; ++i) {
-        const auto& f = friendFinderModule->getFriendRecord(i);
-        if (f.used) {
-            names.push_back(friendFinderModule->getNodeName(f.node));
-        }
-    }
-
-    for(const auto& name : names) {
-        pointers.push_back(name.c_str());
-    }
-
     BannerOverlayOptions bannerOptions;
-    bannerOptions.message = "Track a Friend";
-    bannerOptions.optionsArrayPtr = pointers.data();
-    bannerOptions.optionsCount = pointers.size();
-    bannerOptions.bannerCallback = [](int selected) -> void {
-        if (selected == 0) { // Back
-            menuQueue = friend_finder_base_menu;
-            screen->runNow();
-        } else {
-            selectedFriendListIndex = selected; // Store the 1-based list index
-            menuQueue = friend_finder_list_action_menu;
-            screen->runNow();
+
+    if (friendFinderModule->spoofModeEnabled) {
+        // --- Spoof Mode: Show fake targets ---
+        names.push_back("Back");
+        names.push_back("Track North");
+        names.push_back("Track East");
+        names.push_back("Track South");
+        names.push_back("Track West");
+
+        for(const auto& name : names) {
+            pointers.push_back(name.c_str());
         }
+        
+        bannerOptions.message = "Spoof Test Target";
+        bannerOptions.optionsArrayPtr = pointers.data();
+        bannerOptions.optionsCount = pointers.size();
+        bannerOptions.bannerCallback = [](int selected) -> void {
+            if (selected == 0) { // Back
+                menuQueue = friend_finder_base_menu;
+                screen->runNow();
+            } else { // Track North=1, East=2, South=3, West=4
+                if (friendFinderModule) {
+                    // We pass a bearing: 0 for North, 1 for East, etc.
+                    friendFinderModule->startSpoofedTracking(selected - 1);
+                }
+            }
+        };
+
+    } else {
+        // --- Normal Mode: Show real friends ---
+        names.push_back("Back");
+        for (int i = 0; i < FriendFinderModule::MAX_FRIENDS; ++i) {
+            const auto& f = friendFinderModule->getFriendRecord(i);
+            if (f.used) {
+                names.push_back(friendFinderModule->getNodeName(f.node));
+            }
+        }
+
+        for(const auto& name : names) {
+            pointers.push_back(name.c_str());
+        }
+
+        bannerOptions.message = "Track a Friend";
+        bannerOptions.optionsArrayPtr = pointers.data();
+        bannerOptions.optionsCount = pointers.size();
+        bannerOptions.bannerCallback = [](int selected) -> void {
+            if (selected == 0) { // Back
+                menuQueue = friend_finder_base_menu;
+                screen->runNow();
+            } else {
+                selectedFriendListIndex = selected; // Store the 1-based list index
+                menuQueue = friend_finder_list_action_menu;
+                screen->runNow();
+            }
+        };
+    }
+    
+    screen->showOverlayBanner(bannerOptions);
+}
+
+void menuHandler::friendFinderSpoofSessionMenu()
+{
+    static const char *optionsArray[] = {"Back to Test", "Stop Tracking"};
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Spoof Session";
+    bannerOptions.optionsArrayPtr = optionsArray;
+    bannerOptions.optionsCount = 2;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == 1) { // Stop Tracking
+            if (friendFinderModule) friendFinderModule->endSession(false); // false = don't notify peer
+        }
+        // If "Back" is selected, the banner just closes.
     };
     screen->showOverlayBanner(bannerOptions);
 }
@@ -1290,23 +1359,58 @@ void menuHandler::friendFinderListActionMenu()
 
 void menuHandler::friendFinderCalMenu()
 {
-    static const char *optionsArray[] = {"Back", "Figure-8 Cal", "Flat-Spin Cal", "Set North Here", "Clear North", "Dump Cal"};
-    enum options { Back, Fig8, Flat, SetNorth, ClearNorth, Dump };
+    static std::vector<std::string> options;
+    static std::vector<const char *> pointers;
+    options.clear();
+    pointers.clear();
+
+    options.push_back("Close");
+    options.push_back("Back to Main Menu");
+
+    options.push_back("Figure-8 Cal");
+    options.push_back("Flat-Spin Cal");
+    options.push_back("Set North Here");
+    options.push_back("Clear North");
+    options.push_back("Reset Cal"); 
+
+    if (magnetometerModule) {
+        options.push_back(std::string("Flip North: ") + (magnetometerModule->isNorthFlipped() ? "ON" : "OFF"));
+    } else {
+        options.push_back("Flip North: N/A");
+    }
+    
+    //options.push_back("Dump Cal logs");
+
+    for(const auto& option : options) {
+        pointers.push_back(option.c_str());
+    }
+
+    enum options { Close, BackToMain, FlipNorth, Fig8, Flat, SetNorth, ClearNorth, ClearAll, Dump };
     BannerOverlayOptions bannerOptions;
     bannerOptions.message = "Compass Calibration";
-    bannerOptions.optionsArrayPtr = optionsArray;
-    bannerOptions.optionsCount = 6;
+    bannerOptions.optionsArrayPtr = pointers.data();
+    bannerOptions.optionsCount = pointers.size();
     bannerOptions.bannerCallback = [](int selected) -> void {
-        if (selected == Back) {
-            menuQueue = friend_finder_base_menu;
-            screen->runNow();
+        if (selected == Close) {
+            // Just closes the banner, returning to the compass screen.
+        } else if (selected == BackToMain) {
+            if (friendFinderModule) {
+                friendFinderModule->setState(FriendFinderState::IDLE);
+                menuQueue = friend_finder_base_menu;
+                screen->runNow();
+            }
+        } else if (selected == FlipNorth) {
+            if (magnetometerModule) {
+                magnetometerModule->toggleFlipNorth();
+                // Refresh the menu to show the new state
+                menuQueue = friend_finder_cal_menu;
+                screen->runNow();
+            }
         } else if (magnetometerModule) {
             if (selected == Fig8) {
                 magnetometerModule->startFigure8Calibration(15000);
-                screen->showSimpleBanner("Move in a FIGURE-8 for 15s", 1800);
             } else if (selected == Flat) {
-                magnetometerModule->startFlatSpinCalibration(12000);
-                screen->showSimpleBanner("Spin on table CLOCKWISE for 12s", 1600);
+                magnetometerModule->startFlatSpinCalibration(15000);
             } else if (selected == SetNorth) {
                 if(magnetometerModule->hasHeading()) {
                     magnetometerModule->setNorthHere();
@@ -1317,11 +1421,14 @@ void menuHandler::friendFinderCalMenu()
             } else if (selected == ClearNorth) {
                 magnetometerModule->clearNorthOffset();
                 screen->showSimpleBanner("North offset cleared", 1000);
+            } else if (selected == ClearAll) {
+                menuQueue = friend_finder_clear_cal_confirm;
+                screen->runNow();
             } else if (selected == Dump) {
                 magnetometerModule->dumpCalToLog();
                 screen->showSimpleBanner("Cal dumped to log", 1000);
             }
-        } else if (selected != Back) {
+        } else if (selected > FlipNorth) {
             screen->showSimpleBanner("No magnetometer", 1200);
         }
     };
@@ -1330,7 +1437,7 @@ void menuHandler::friendFinderCalMenu()
 
 void menuHandler::friendFinderSessionMenu()
 {
-    static const char *optionsArray[] = {"Back", "Stop Tracking", "Toggle Mag View"};
+    static const char *optionsArray[] = {"Back", "Stop Tracking", "Toggle Compass"};
     enum options { Back, Stop, ToggleView };
     BannerOverlayOptions bannerOptions;
     bannerOptions.message = "Session Menu";
@@ -1388,6 +1495,27 @@ void menuHandler::friendFinderPairingMenu()
     };
     screen->showOverlayBanner(bannerOptions);
 }
+
+void menuHandler::friendFinderClearCalConfirmMenu()
+{
+    static const char *optionsArray[] = {"No", "Yes"};
+    BannerOverlayOptions bannerOptions;
+    bannerOptions.message = "Clear ALL calibration?";
+    bannerOptions.optionsArrayPtr = optionsArray;
+    bannerOptions.optionsCount = 2;
+    bannerOptions.bannerCallback = [](int selected) -> void {
+        if (selected == 1) { // Yes
+            if (magnetometerModule) {
+                magnetometerModule->clearAllCalibration();
+                screen->showSimpleBanner("All calibration cleared", 1200);
+            }
+        }
+        // If "No" is selected, the banner simply closes.
+        // If "Yes", the action is performed, a message is shown, and then we return.
+    };
+    screen->showOverlayBanner(bannerOptions);
+}
+
 
 
 void menuHandler::handleMenuSwitch(OLEDDisplay *display)
@@ -1511,7 +1639,14 @@ void menuHandler::handleMenuSwitch(OLEDDisplay *display)
     case friend_finder_pairing_menu:
         friendFinderPairingMenu();
         break;
+    case friend_finder_spoof_session_menu:
+        friendFinderSpoofSessionMenu();
+        break;
+    case friend_finder_clear_cal_confirm:
+        friendFinderClearCalConfirmMenu();
+        break;
     }
+    
     menuQueue = menu_none;
 }
 

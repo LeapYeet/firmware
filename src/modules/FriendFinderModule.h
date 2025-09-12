@@ -25,7 +25,9 @@ enum class FriendFinderState : uint8_t {
     AWAITING_FINAL_ACCEPTANCE,
     TRACKING_TARGET,
     BEING_TRACKED,
-    FRIEND_MAP
+    FRIEND_MAP,
+    COMPASS_SCREEN,
+    TRACKING_SPOOFED_TARGET
 };
 
 class FriendFinderModule
@@ -55,6 +57,7 @@ public:
     void setState(FriendFinderState s);
     bool friendMapNamesVisible = true;
     bool forceNoMagnetometerView = false;
+    bool spoofModeEnabled = false;
 
     // ---- Core Module Functions ----
     bool    handleReceivedProtobuf(const meshtastic_MeshPacket &mp,
@@ -79,6 +82,7 @@ public:
     void beginPairing();
     void requestMutualTracking(uint32_t nodeNum);
     void endSession(bool notifyPeer);
+    void startSpoofedTracking(int direction);
 
     // Public for banner callback access
     void acceptPairingRequest();
@@ -88,20 +92,22 @@ private:
     // -------- persist friends --------
     FriendRecord friends_[MAX_FRIENDS]{};
     void loadFriends();
-    void saveFriends();
+    void saveFriends(); 
     int  findFriend(uint32_t node) const;
     void upsertFriend(uint32_t node, uint32_t session_id, const uint8_t secret[16]);
     int getFriendSlotByListIndex(int listIdx) const;
-
+    
 private:
     FriendFinderState currentState = FriendFinderState::IDLE;
     FriendFinderState previousState = FriendFinderState::IDLE;
-
+    int spoofedDirection = 0;
+    
     uint32_t          targetNodeNum = 0;
     meshtastic_FriendFinder lastFriendData {};
     uint32_t          lastFriendPacketTime = 0;
     uint32_t          lastSentPacketTime   = 0;
     uint32_t          lastBackgroundUpdateTime = 0;
+    uint32_t          lastDebugLogMs = 0; 
 
     // Pairing window
     bool              pairingWindowOpen = false;
@@ -139,6 +145,9 @@ private:
 #if HAS_SCREEN
     // Drawing helpers are member functions to access state
     void drawFriendMap(OLEDDisplay *d, int16_t x, int16_t y, int W, int H);
+    void drawSimpleCompass(OLEDDisplay *d, int16_t x, int16_t y, int W, int H);
+    void drawFigure8Cal(OLEDDisplay *d, int16_t x, int16_t y, int W, int H);
+    void drawFlatSpinCal(OLEDDisplay *d, int16_t x, int16_t y, int W, int H);
     void drawSessionPage(OLEDDisplay *d, int16_t x, int16_t y, int W, int H,
                          const char* peerName,
                          const meshtastic_FriendFinder& peerData,
