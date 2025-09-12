@@ -1235,9 +1235,12 @@ void menuHandler::friendFinderBaseMenu()
     screen->showOverlayBanner(bannerOptions);
 }
 
+
 void menuHandler::friendFinderListMenu()
 {
-    if (!friendFinderModule) return;
+    if (!friendFinderModule) {
+        return;
+    }
 
     static std::vector<std::string> names;
     static std::vector<const char *> pointers;
@@ -1247,49 +1250,36 @@ void menuHandler::friendFinderListMenu()
     BannerOverlayOptions bannerOptions;
 
     if (friendFinderModule->spoofModeEnabled) {
-        // --- Spoof Mode: Show fake targets ---
+        // Spoof Mode: Show fake targets for testing
         names.push_back("Back");
         names.push_back("Track North");
         names.push_back("Track East");
         names.push_back("Track South");
         names.push_back("Track West");
 
-        for(const auto& name : names) {
-            pointers.push_back(name.c_str());
-        }
-        
         bannerOptions.message = "Spoof Test Target";
-        bannerOptions.optionsArrayPtr = pointers.data();
-        bannerOptions.optionsCount = pointers.size();
         bannerOptions.bannerCallback = [](int selected) -> void {
             if (selected == 0) { // Back
                 menuQueue = friend_finder_base_menu;
                 screen->runNow();
-            } else { // Track North=1, East=2, South=3, West=4
+            } else { // Track a direction (North=1, East=2, etc.)
                 if (friendFinderModule) {
-                    // We pass a bearing: 0 for North, 1 for East, etc.
+                    // Pass the direction index (0 for North, 1 for East, etc.)
                     friendFinderModule->startSpoofedTracking(selected - 1);
                 }
             }
         };
-
     } else {
-        // --- Normal Mode: Show real friends ---
+        // Normal Mode: Show real friends
         names.push_back("Back");
         for (int i = 0; i < FriendFinderModule::MAX_FRIENDS; ++i) {
-            const auto& f = friendFinderModule->getFriendRecord(i);
+            const auto &f = friendFinderModule->getFriendRecord(i);
             if (f.used) {
                 names.push_back(friendFinderModule->getNodeName(f.node));
             }
         }
 
-        for(const auto& name : names) {
-            pointers.push_back(name.c_str());
-        }
-
         bannerOptions.message = "Track a Friend";
-        bannerOptions.optionsArrayPtr = pointers.data();
-        bannerOptions.optionsCount = pointers.size();
         bannerOptions.bannerCallback = [](int selected) -> void {
             if (selected == 0) { // Back
                 menuQueue = friend_finder_base_menu;
@@ -1301,7 +1291,14 @@ void menuHandler::friendFinderListMenu()
             }
         };
     }
-    
+
+    // Populate the C-style string pointers for the banner
+    for (const auto &name : names) {
+        pointers.push_back(name.c_str());
+    }
+
+    bannerOptions.optionsArrayPtr = pointers.data();
+    bannerOptions.optionsCount = pointers.size();
     screen->showOverlayBanner(bannerOptions);
 }
 
@@ -1314,23 +1311,29 @@ void menuHandler::friendFinderSpoofSessionMenu()
     bannerOptions.optionsCount = 2;
     bannerOptions.bannerCallback = [](int selected) -> void {
         if (selected == 1) { // Stop Tracking
-            if (friendFinderModule) friendFinderModule->endSession(false); // false = don't notify peer
+            if (friendFinderModule) {
+                friendFinderModule->endSession(false); // false = don't notify peer
+            }
         }
-        // If "Back" is selected, the banner just closes.
+        // If "Back to Test" is selected, the banner just closes.
     };
     screen->showOverlayBanner(bannerOptions);
 }
 
 void menuHandler::friendFinderListActionMenu()
 {
-    if (!friendFinderModule || selectedFriendListIndex == 0) return;
-    
-    const auto* rec = friendFinderModule->getFriendByListIndex(selectedFriendListIndex);
-    if (!rec) return;
+    if (!friendFinderModule || selectedFriendListIndex == 0) {
+        return;
+    }
+
+    const auto *rec = friendFinderModule->getFriendByListIndex(selectedFriendListIndex);
+    if (!rec) {
+        return;
+    }
 
     static const char *optionsArray[] = {"Back", "Track", "Remove"};
     BannerOverlayOptions bannerOptions;
-    
+
     static char message[48];
     snprintf(message, sizeof(message), "Friend: %s", friendFinderModule->getShortName(rec->node));
     bannerOptions.message = message;
@@ -1342,14 +1345,16 @@ void menuHandler::friendFinderListActionMenu()
             menuQueue = friend_finder_list_menu;
             screen->runNow();
         } else if (selected == 1) { // Track
-            const auto* friendRec = friendFinderModule->getFriendByListIndex(selectedFriendListIndex);
-            if(friendRec) friendFinderModule->requestMutualTracking(friendRec->node);
+            const auto *friendRec = friendFinderModule->getFriendByListIndex(selectedFriendListIndex);
+            if (friendRec) {
+                friendFinderModule->requestMutualTracking(friendRec->node);
+            }
         } else if (selected == 2) { // Remove
             friendFinderModule->removeFriendByListIndex(selectedFriendListIndex);
             if (friendFinderModule->getUsedFriendsCount() > 0) {
-                 menuQueue = friend_finder_list_menu; // Refresh list
+                menuQueue = friend_finder_list_menu; // Refresh list
             } else {
-                menuQueue = friend_finder_base_menu; // No friends left
+                menuQueue = friend_finder_base_menu; // No friends left, go to base
             }
             screen->runNow();
         }
@@ -1364,72 +1369,81 @@ void menuHandler::friendFinderCalMenu()
     options.clear();
     pointers.clear();
 
+    // Build the menu options in a logical, fixed order
     options.push_back("Close");
     options.push_back("Back to Main Menu");
-
     options.push_back("Figure-8 Cal");
     options.push_back("Flat-Spin Cal");
     options.push_back("Set North Here");
-    options.push_back("Clear North");
-    options.push_back("Reset Cal"); 
-
+    options.push_back("Clear North Offset");
+    options.push_back("Clear All Calibration");
     if (magnetometerModule) {
         options.push_back(std::string("Flip North: ") + (magnetometerModule->isNorthFlipped() ? "ON" : "OFF"));
     } else {
         options.push_back("Flip North: N/A");
     }
-    
-    //options.push_back("Dump Cal logs");
+    options.push_back("Dump Cal Logs");
 
-    for(const auto& option : options) {
+    for (const auto &option : options) {
         pointers.push_back(option.c_str());
     }
 
-    enum options { Close, BackToMain, FlipNorth, Fig8, Flat, SetNorth, ClearNorth, ClearAll, Dump };
     BannerOverlayOptions bannerOptions;
     bannerOptions.message = "Compass Calibration";
     bannerOptions.optionsArrayPtr = pointers.data();
     bannerOptions.optionsCount = pointers.size();
     bannerOptions.bannerCallback = [](int selected) -> void {
-        if (selected == Close) {
+        // Use a switch statement on the selected index for robust handling
+        switch (selected) {
+        case 0: // Close
             // Just closes the banner, returning to the compass screen.
-        } else if (selected == BackToMain) {
+            break;
+        case 1: // Back to Main Menu
             if (friendFinderModule) {
                 friendFinderModule->setState(FriendFinderState::IDLE);
                 menuQueue = friend_finder_base_menu;
                 screen->runNow();
             }
-        } else if (selected == FlipNorth) {
-            if (magnetometerModule) {
-                magnetometerModule->toggleFlipNorth();
-                // Refresh the menu to show the new state
-                menuQueue = friend_finder_cal_menu;
-                screen->runNow();
+            break;
+        case 2: // Figure-8 Cal
+        case 3: // Flat-Spin Cal
+        case 4: // Set North Here
+        case 5: // Clear North Offset
+        case 6: // Clear All Calibration
+        case 8: // Dump Cal Logs
+            if (!magnetometerModule) {
+                screen->showSimpleBanner("No magnetometer", 1200);
+                break;
             }
-        } else if (magnetometerModule) {
-            if (selected == Fig8) {
-                magnetometerModule->startFigure8Calibration(15000);
-            } else if (selected == Flat) {
-                magnetometerModule->startFlatSpinCalibration(15000);
-            } else if (selected == SetNorth) {
-                if(magnetometerModule->hasHeading()) {
+            if (selected == 2) {
+                magnetometerModule->startFigure8Calibration();
+            } else if (selected == 3) {
+                magnetometerModule->startFlatSpinCalibration();
+            } else if (selected == 4) {
+                if (magnetometerModule->hasHeading()) {
                     magnetometerModule->setNorthHere();
                     screen->showSimpleBanner("North set to current heading", 1200);
                 } else {
-                     screen->showSimpleBanner("Heading not ready", 800);
+                    screen->showSimpleBanner("Heading not ready", 800);
                 }
-            } else if (selected == ClearNorth) {
+            } else if (selected == 5) {
                 magnetometerModule->clearNorthOffset();
                 screen->showSimpleBanner("North offset cleared", 1000);
-            } else if (selected == ClearAll) {
+            } else if (selected == 6) {
                 menuQueue = friend_finder_clear_cal_confirm;
                 screen->runNow();
-            } else if (selected == Dump) {
+            } else if (selected == 8) {
                 magnetometerModule->dumpCalToLog();
                 screen->showSimpleBanner("Cal dumped to log", 1000);
             }
-        } else if (selected > FlipNorth) {
-            screen->showSimpleBanner("No magnetometer", 1200);
+            break;
+        case 7: // Flip North
+            if (magnetometerModule) {
+                magnetometerModule->toggleFlipNorth();
+                menuQueue = friend_finder_cal_menu; // Refresh menu to show new state
+                screen->runNow();
+            }
+            break;
         }
     };
     screen->showOverlayBanner(bannerOptions);
@@ -1437,16 +1451,17 @@ void menuHandler::friendFinderCalMenu()
 
 void menuHandler::friendFinderSessionMenu()
 {
-    static const char *optionsArray[] = {"Back", "Stop Tracking", "Toggle Compass"};
-    enum options { Back, Stop, ToggleView };
+    static const char *optionsArray[] = {"Back", "Stop Tracking", "Toggle Compass View"};
     BannerOverlayOptions bannerOptions;
     bannerOptions.message = "Session Menu";
     bannerOptions.optionsArrayPtr = optionsArray;
     bannerOptions.optionsCount = 3;
     bannerOptions.bannerCallback = [](int selected) -> void {
-        if (selected == Stop) { // Stop Tracking
-            if (friendFinderModule) friendFinderModule->endSession(true);
-        } else if (selected == ToggleView) { // Toggle test view
+        if (selected == 1) { // Stop Tracking
+            if (friendFinderModule) {
+                friendFinderModule->endSession(true);
+            }
+        } else if (selected == 2) { // Toggle Compass View
             if (friendFinderModule) {
                 friendFinderModule->forceNoMagnetometerView = !friendFinderModule->forceNoMagnetometerView;
             }
@@ -1465,15 +1480,17 @@ void menuHandler::friendFinderMapMenu()
     bannerOptions.optionsCount = 3;
     bannerOptions.bannerCallback = [](int selected) -> void {
         if (selected == 1) { // Toggle Names
-            if (friendFinderModule) friendFinderModule->friendMapNamesVisible = !friendFinderModule->friendMapNamesVisible;
+            if (friendFinderModule) {
+                friendFinderModule->friendMapNamesVisible = !friendFinderModule->friendMapNamesVisible;
+            }
         } else if (selected == 2) { // Exit Map
             if (friendFinderModule) {
-                 menuQueue = friend_finder_base_menu;
-                 friendFinderModule->setState(FriendFinderState::IDLE); // Make sure we leave map state
-                 screen->runNow();
+                menuQueue = friend_finder_base_menu;
+                friendFinderModule->setState(FriendFinderState::IDLE); // Ensure we leave map state
+                screen->runNow();
             }
         }
-        // If "Back" is selected, the banner just closes, returning to the map.
+        // If "Back to Map" is selected, the banner just closes.
     };
     screen->showOverlayBanner(bannerOptions);
 }
@@ -1488,7 +1505,7 @@ void menuHandler::friendFinderPairingMenu()
     bannerOptions.bannerCallback = [](int selected) -> void {
         if (selected == 1) { // Cancel Pairing
             if (friendFinderModule) {
-                // friendFinderModule->cancelPairing();
+                // To be implemented: friendFinderModule->cancelPairing();
             }
         }
         // If "Back" is selected, the banner just closes.
@@ -1511,11 +1528,10 @@ void menuHandler::friendFinderClearCalConfirmMenu()
             }
         }
         // If "No" is selected, the banner simply closes.
-        // If "Yes", the action is performed, a message is shown, and then we return.
+        // If "Yes", the action is performed, and the screen returns to the previous state.
     };
     screen->showOverlayBanner(bannerOptions);
 }
-
 
 
 void menuHandler::handleMenuSwitch(OLEDDisplay *display)

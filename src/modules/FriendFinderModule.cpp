@@ -898,7 +898,7 @@ void FriendFinderModule::drawFlatSpinCal(OLEDDisplay *d, int16_t x, int16_t y, i
     d->drawString(x + W / 2, y, "");
 
     // Countdown Timer in the center
-    uint32_t remainingMs = 12000 * (100 - magnetometerModule->getFlatCalPercent()) / 100;
+    uint32_t remainingMs = 15000 * (100 - magnetometerModule->getFlatCalPercent()) / 100;
     char timeBuf[10];
     snprintf(timeBuf, sizeof(timeBuf), "%.1fs", (float)remainingMs / 1000.0f);
     
@@ -1210,7 +1210,7 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
         currentState == FriendFinderState::AWAITING_FINAL_ACCEPTANCE) {
         display->setFont(FONT_SMALL);
         display->setTextAlignment(TEXT_ALIGN_CENTER);
-        display->drawString(x + W / 2, y, "Friend Finder Pairing");
+        display->drawString(x + W / 2, y, "Pairing");
 
         const int32_t remainMs = (int32_t)(pairingWindowOpen ? (pairingWindowExpiresAt - millis()) : 0);
         const int remain = remainMs > 0 ? (remainMs + 999) / 1000 : 0;
@@ -1225,7 +1225,7 @@ void FriendFinderModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *sta
         } else if (currentState == FriendFinderState::AWAITING_CONFIRMATION) {
             display->drawString(x + W / 2, y + H / 2 - (FONT_HEIGHT_SMALL/2), "Found peer!");
             display->drawString(x + W / 2, y + H / 2 + (FONT_HEIGHT_SMALL/2), "Awaiting confirmation...");
-        } else { // AWAITING_FINAL_ACCEPTANCE
+        } else {
              display->drawString(x + W / 2, y + H / 2, "Waiting for peer to accept...");
         }
         return;
